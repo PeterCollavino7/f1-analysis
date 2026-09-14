@@ -9,6 +9,7 @@ import datetime
 import fastf1
 import fastf1.plotting
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -93,6 +94,34 @@ def hex_to_rgba(hex_color, alpha):
     return f"rgba({r},{g},{b},{alpha})"
 
 
+def format_lap_time(td):
+    if pd.isna(td):
+        return "—"
+    total = td.total_seconds()
+    minutes = int(total // 60)
+    seconds = total - minutes * 60
+    return f"{minutes}:{seconds:06.3f}" if minutes else f"{seconds:.3f}"
+
+
+def format_race_gap(row, leader_laps):
+    status = row.get("Status")
+    if row.get("Position") == 1:
+        td = row.get("Time")
+        if pd.isna(td):
+            return "—"
+        total = td.total_seconds()
+        h, m, s = int(total // 3600), int((total % 3600) // 60), total % 60
+        return f"{h}:{m:02d}:{s:06.3f}" if h else f"{m}:{s:06.3f}"
+    if status == "Lapped" and leader_laps is not None and pd.notna(row.get("Laps")):
+        laps_down = int(leader_laps - row["Laps"])
+        return f"+{laps_down} Lap" + ("s" if laps_down != 1 else "")
+    if status == "Finished" and pd.notna(row.get("Time")):
+        return f"+{row['Time'].total_seconds():.3f}"
+    if pd.notna(row.get("Laps")) and row["Laps"] > 0 and status not in (None, "Finished"):
+        return f"{status} ({int(row['Laps'])} laps)"
+    return status if pd.notna(status) else "—"
+
+
 def order_by_classification(session, drivers):
     """Finishing/classification order (P1 first) when available -- falls
     back to alphabetical for sessions with no classification yet, like
@@ -156,7 +185,9 @@ except Exception as exc:
 
 st.subheader(f"{year} {event_name} — {session_name}")
 
-tab_telemetry, tab_pace = st.tabs(["Head-to-head telemetry", "Race pace & tyre degradation"])
+tab_telemetry, tab_pace, tab_classification = st.tabs(
+    ["Head-to-head telemetry", "Race pace & tyre degradation", "Classification"]
+)
 
 # ------------------------------------------------------------- telemetry --
 
@@ -623,3 +654,54 @@ with tab_pace:
             )
             fig_drivers.update_yaxes(autorange="reversed")
             st.plotly_chart(fig_drivers, width="stretch")
+
+# --------------------------------------------------------- classification --
+
+with tab_classification:
+    results = session.results
+
+    if results.empty or results["Position"].isna().all():
+        # Practice has no official classification -- rank by fastest lap
+        # instead, the closest equivalent to what timing screens show live.
+        st.caption(
+            f"{session_name} has no official classification -- ranked by each driver's "
+            "fastest lap instead."
+        )
+        fastest = session.laps.groupby("Driver")["LapTime"].min().dropna().sort_values()
+        team_by_driver = results.set_index("Abbreviation")["TeamName"] if not results.empty else {}
+        rows = [
+            {
+                "Pos": rank,
+                "Driver": driver,
+                "Team": team_by_driver.get(driver, ""),
+                "Best lap": format_lap_time(lap_time),
+                "Gap": "—" if rank == 1 else f"+{(lap_time - fastest.iloc[0]).total_seconds():.3f}",
+            }
+            for rank, (driver, lap_time) in enumerate(fastest.items(), start=1)
+        ]
+        st.dataframe(rows, hide_index=True, width="stretch")
+    else:
+        has_quali_times = results[["Q1", "Q2", "Q3"]].notna().any().any()
+        classified = results.sort_values("Position")
+        leader_row = classified[classified["Position"] == 1]
+        leader_laps = leader_row["Laps"].iloc[0] if len(leader_row) and pd.notna(leader_row["Laps"].iloc[0]) else None
+
+        rows = []
+        for _, r in classified.iterrows():
+            row = {
+                "Pos": int(r["Position"]) if pd.notna(r["Position"]) else "—",
+                "Driver": r["Abbreviation"],
+                "Team": r["TeamName"],
+            }
+            if has_quali_times:
+                row["Q1"] = format_lap_time(r["Q1"])
+                row["Q2"] = format_lap_time(r["Q2"])
+                row["Q3"] = format_lap_time(r["Q3"])
+            else:
+                row["Grid"] = int(r["GridPosition"]) if pd.notna(r["GridPosition"]) else "—"
+                row["Gap"] = format_race_gap(r, leader_laps)
+                row["Pts"] = r["Points"] if pd.notna(r["Points"]) else 0
+                row["Status"] = r["Status"] if pd.notna(r["Status"]) else "—"
+            rows.append(row)
+
+        st.dataframe(rows, hide_index=True, width="stretch")
