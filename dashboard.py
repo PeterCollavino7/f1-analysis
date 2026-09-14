@@ -1,9 +1,6 @@
 """
-Head-to-head telemetry dashboard.
-
-Pick a season, a race weekend, and one of its actual sessions (practice,
-qualifying, sprint, race -- whichever that weekend had), then up to 3
-drivers; compares their fastest lap in that session.
+F1 session dashboard: head-to-head telemetry, and race pace / tyre
+degradation, for any past race weekend and any of its actual sessions.
 
 Run with: venv\\Scripts\\streamlit run dashboard.py
 """
@@ -17,13 +14,23 @@ import streamlit as st
 
 fastf1.Cache.enable_cache("cache")
 
-st.set_page_config(page_title="F1 Telemetry Compare", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="F1 Dashboard", layout="wide", initial_sidebar_state="expanded")
 
 MAX_DRIVERS = 3
 CHART_HEIGHT = 340
 LINE_STYLES = ["solid", "dash", "dot"]  # cycled when two selected drivers share a team color
 KM_TO_MI = 0.621371
 M_TO_FT = 3.28084
+MIN_LAPS_FOR_TREND = 10  # per compound, for the pooled fuel-correction fit
+MIN_LAPS_PER_DRIVER = 6  # per driver+compound, for the per-driver breakdown
+
+COMPOUND_COLORS = {
+    "SOFT": "#ff3333",
+    "MEDIUM": "#ffd400",
+    "HARD": "#f0f0f0",
+    "INTERMEDIATE": "#43b02a",
+    "WET": "#0067ad",
+}
 
 # FastF1's timing/telemetry data is only reliably complete from 2018 on.
 YEARS = list(range(2026, 2017, -1))
@@ -45,7 +52,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-st.title("🏁 Head-to-head telemetry")
+st.title("🏁 F1 Dashboard")
 
 
 @st.cache_data(ttl=3600)
@@ -86,6 +93,31 @@ def hex_to_rgba(hex_color, alpha):
     return f"rgba({r},{g},{b},{alpha})"
 
 
+def base_figure(title, yaxis_title, xaxis_title):
+    fig = go.Figure()
+    fig.update_layout(
+        title=title,
+        xaxis_title=xaxis_title,
+        yaxis_title=yaxis_title,
+        height=CHART_HEIGHT,
+        # "x" (not "x unified"): unified mode's shared header shows the raw
+        # x-value with no way to attach a unit to it, which is exactly what
+        # looked broken/unlabelled before. In "x" mode each trace keeps its
+        # own hovertemplate -- and every template below already spells out
+        # its own units -- so there's no bare, unlabelled number left.
+        hovermode="x",
+        margin=dict(t=40, b=40),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    fig.update_xaxes(showspikes=True, spikemode="across", spikethickness=1, spikedash="dot")
+    fig.update_yaxes(gridcolor="rgba(255,255,255,0.08)")
+    return fig
+
+
+# ---------------------------------------------------------------- sidebar --
+
 year = st.sidebar.selectbox("Year", options=YEARS)
 schedule = load_schedule(year)
 
@@ -100,146 +132,249 @@ except Exception as exc:
     st.error(f"Couldn't load this session (it may not have happened yet): {exc}")
     st.stop()
 
-all_drivers = sorted(session.laps["Driver"].unique())
-selected_drivers = st.sidebar.multiselect(
-    "Drivers (max 3)",
-    options=all_drivers,
-    default=all_drivers[:2],
-    max_selections=MAX_DRIVERS,
-)
+st.subheader(f"{year} {event_name} — {session_name}")
 
-units = st.sidebar.radio("Units", options=["Metric (km/h, m)", "Imperial (mph, ft)"], horizontal=False)
-imperial = units.startswith("Imperial")
-speed_unit = "mph" if imperial else "km/h"
-dist_unit = "ft" if imperial else "m"
+tab_telemetry, tab_pace = st.tabs(["Head-to-head telemetry", "Race pace & tyre degradation"])
 
-if not selected_drivers:
-    st.info("Select at least one driver from the sidebar.")
-    st.stop()
+# ------------------------------------------------------------- telemetry --
 
-laps_by_driver = {d: session.laps.pick_drivers(d).pick_fastest() for d in selected_drivers}
-telemetry_by_driver = {d: lap.get_car_data().add_distance() for d, lap in laps_by_driver.items()}
-
-# Real team colors, like FastF1's own plotting module uses -- but two
-# selected teammates (e.g. LEC/HAM at Ferrari) then share the exact same
-# color, which defeats the point of a head-to-head chart. When that happens,
-# later drivers with a repeated color get a dashed/dotted line instead of a
-# second solid line of the same color.
-driver_style = {}
-seen_colors = {}
-for driver in selected_drivers:
-    color = fastf1.plotting.get_driver_color(driver, session)
-    dash = LINE_STYLES[seen_colors.get(color, 0)]
-    seen_colors[color] = seen_colors.get(color, 0) + 1
-    driver_style[driver] = (color, dash)
-
-st.subheader(f"{year} {event_name} — {session_name} — fastest lap comparison")
-
-cards = st.columns(len(selected_drivers))
-for col, driver in zip(cards, selected_drivers):
-    lap = laps_by_driver[driver]
-    color, dash = driver_style[driver]
-    top_speed = telemetry_by_driver[driver]["Speed"].max()
-    if imperial:
-        top_speed *= KM_TO_MI
-    dash_note = f" ({dash} line)" if dash != "solid" else ""
-    col.markdown(
-        f"""
-        <div class="driver-card" style="--card-color:{color}">
-            <div class="name">{driver}{dash_note}</div>
-            <div class="laptime">{str(lap["LapTime"]).split(" ")[-1][:-3]}</div>
-            <div class="sub">Top speed: {top_speed:.0f} {speed_unit}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+with tab_telemetry:
+    all_drivers = sorted(session.laps["Driver"].unique())
+    selected_drivers = st.multiselect(
+        "Drivers (max 3)",
+        options=all_drivers,
+        default=all_drivers[:2],
+        max_selections=MAX_DRIVERS,
+        key="telemetry_drivers",
     )
+    units = st.radio("Units", options=["Metric (km/h, m)", "Imperial (mph, ft)"], horizontal=True)
+    imperial = units.startswith("Imperial")
+    speed_unit = "mph" if imperial else "km/h"
+    dist_unit = "ft" if imperial else "m"
 
-st.write("")
+    if not selected_drivers:
+        st.info("Select at least one driver above.")
+        st.stop()
 
+    laps_by_driver = {d: session.laps.pick_drivers(d).pick_fastest() for d in selected_drivers}
+    telemetry_by_driver = {d: lap.get_car_data().add_distance() for d, lap in laps_by_driver.items()}
 
-def base_figure(title, yaxis_title):
-    fig = go.Figure()
-    fig.update_layout(
-        title=title,
-        xaxis_title=f"Distance ({dist_unit})",
-        yaxis_title=yaxis_title,
-        height=CHART_HEIGHT,
-        hovermode="x unified",
-        margin=dict(t=40, b=40),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
-    fig.update_xaxes(showspikes=True, spikemode="across", spikethickness=1, spikedash="dot")
-    fig.update_yaxes(gridcolor="rgba(255,255,255,0.08)")
-    return fig
+    # Real team colors, like FastF1's own plotting module uses -- but two
+    # selected teammates (e.g. LEC/HAM at Ferrari) then share the exact same
+    # color, which defeats the point of a head-to-head chart. When that
+    # happens, later drivers with a repeated color get a dashed/dotted line
+    # instead of a second solid line of the same color.
+    driver_style = {}
+    seen_colors = {}
+    for driver in selected_drivers:
+        color = fastf1.plotting.get_driver_color(driver, session)
+        dash = LINE_STYLES[seen_colors.get(color, 0)]
+        seen_colors[color] = seen_colors.get(color, 0) + 1
+        driver_style[driver] = (color, dash)
 
-
-fig_speed = base_figure("Speed", speed_unit)
-fig_throttle = base_figure("Throttle", "%")
-fig_brake = base_figure("Brake", "")
-fig_brake.update_yaxes(tickvals=[0, 1], ticktext=["Off", "On"], range=[-0.15, 1.15])
-
-for driver in selected_drivers:
-    tel = telemetry_by_driver[driver]
-    color, dash = driver_style[driver]
-    distance = tel["Distance"] * (M_TO_FT if imperial else 1)
-    speed = tel["Speed"] * (KM_TO_MI if imperial else 1)
-
-    fig_speed.add_trace(
-        go.Scatter(
-            x=distance, y=speed, name=driver, line=dict(color=color, dash=dash, width=2.5),
-            hovertemplate=f"{driver}: %{{y:.0f}} {speed_unit} · %{{x:.0f}} {dist_unit}<extra></extra>",
+    cards = st.columns(len(selected_drivers))
+    for col, driver in zip(cards, selected_drivers):
+        lap = laps_by_driver[driver]
+        color, dash = driver_style[driver]
+        speed_series = telemetry_by_driver[driver]["Speed"] * (KM_TO_MI if imperial else 1)
+        dash_note = f" ({dash} line)" if dash != "solid" else ""
+        col.markdown(
+            f"""
+            <div class="driver-card" style="--card-color:{color}">
+                <div class="name">{driver}{dash_note}</div>
+                <div class="laptime">{str(lap["LapTime"]).split(" ")[-1][:-3]}</div>
+                <div class="sub">Top speed: {speed_series.max():.0f} {speed_unit} · Average: {speed_series.mean():.0f} {speed_unit}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-    )
-    fig_throttle.add_trace(
-        go.Scatter(
-            x=distance, y=tel["Throttle"], name=driver, line=dict(color=color, dash=dash, width=2.5),
-            hovertemplate=f"{driver}: %{{y:.0f}}% · %{{x:.0f}} {dist_unit}<extra></extra>",
+
+    st.write("")
+
+    dist_title = f"Distance ({dist_unit})"
+    fig_speed = base_figure("Speed", speed_unit, dist_title)
+    fig_throttle = base_figure("Throttle", "%", dist_title)
+    fig_brake = base_figure("Brake", "", dist_title)
+    fig_brake.update_yaxes(tickvals=[0, 1], ticktext=["Off", "On"], range=[-0.15, 1.15])
+    fig_gear = base_figure("Gear", "", dist_title)
+    fig_gear.update_yaxes(tickvals=list(range(1, 9)), range=[0.5, 8.5])
+
+    for driver in selected_drivers:
+        tel = telemetry_by_driver[driver]
+        color, dash = driver_style[driver]
+        distance = tel["Distance"] * (M_TO_FT if imperial else 1)
+        speed = tel["Speed"] * (KM_TO_MI if imperial else 1)
+
+        fig_speed.add_trace(
+            go.Scatter(
+                x=distance, y=speed, name=driver, line=dict(color=color, dash=dash, width=2.5),
+                hovertemplate=f"{driver}: %{{y:.0f}} {speed_unit} · %{{x:.0f}} {dist_unit}<extra></extra>",
+            )
         )
-    )
-    brake_state = np.where(tel["Brake"], "On", "Off")
-    fig_brake.add_trace(
-        go.Scatter(
-            x=distance, y=tel["Brake"].astype(int), name=driver, line=dict(color=color, dash=dash, width=2.5, shape="hv"),
-            text=brake_state,
-            hovertemplate=f"{driver}: " + "%{text}" + f" · %{{x:.0f}} {dist_unit}<extra></extra>",
+        fig_throttle.add_trace(
+            go.Scatter(
+                x=distance, y=tel["Throttle"], name=driver, line=dict(color=color, dash=dash, width=2.5),
+                hovertemplate=f"{driver}: %{{y:.0f}}% · %{{x:.0f}} {dist_unit}<extra></extra>",
+            )
         )
-    )
-
-# Delta time: gap to the fastest of the selected laps, over distance. Each
-# driver's telemetry has its own Distance grid, so the others are
-# interpolated onto the reference driver's grid before subtracting elapsed
-# time -- this is the same idea as fastf1.utils.delta_time, done directly
-# here since that helper is deprecated and the library's own docs flag it as
-# not very accurate.
-reference_driver = min(laps_by_driver, key=lambda d: laps_by_driver[d]["LapTime"])
-ref_tel = telemetry_by_driver[reference_driver]
-ref_elapsed = (ref_tel["Time"] - ref_tel["Time"].iloc[0]).dt.total_seconds().to_numpy()
-ref_distance_m = ref_tel["Distance"].to_numpy()
-ref_distance = ref_distance_m * (M_TO_FT if imperial else 1)
-
-fig_delta = base_figure("Delta time", f"s (vs. {reference_driver})")
-fig_delta.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.4)")
-
-for driver in selected_drivers:
-    if driver == reference_driver:
-        continue
-    tel = telemetry_by_driver[driver]
-    color, dash = driver_style[driver]
-    elapsed = (tel["Time"] - tel["Time"].iloc[0]).dt.total_seconds().to_numpy()
-    elapsed_on_ref_grid = np.interp(ref_distance_m, tel["Distance"].to_numpy(), elapsed)
-    delta = elapsed_on_ref_grid - ref_elapsed
-    fig_delta.add_trace(
-        go.Scatter(
-            x=ref_distance, y=delta, name=f"{driver} vs {reference_driver}",
-            line=dict(color=color, dash=dash, width=2.5),
-            fill="tozeroy", fillcolor=hex_to_rgba(color, 0.15),
-            hovertemplate=f"{driver} vs {reference_driver}: %{{y:+.2f}} s · %{{x:.0f}} {dist_unit}<extra></extra>",
+        brake_state = np.where(tel["Brake"], "On", "Off")
+        fig_brake.add_trace(
+            go.Scatter(
+                x=distance, y=tel["Brake"].astype(int), name=driver,
+                line=dict(color=color, dash=dash, width=2.5, shape="hv"),
+                text=brake_state,
+                hovertemplate=f"{driver}: " + "%{text}" + f" · %{{x:.0f}} {dist_unit}<extra></extra>",
+            )
         )
-    )
+        fig_gear.add_trace(
+            go.Scatter(
+                x=distance, y=tel["nGear"], name=driver, line=dict(color=color, dash=dash, width=2.5, shape="hv"),
+                hovertemplate=f"{driver}: gear %{{y:.0f}} · %{{x:.0f}} {dist_unit}<extra></extra>",
+            )
+        )
 
-st.plotly_chart(fig_speed, width="stretch")
-st.plotly_chart(fig_delta, width="stretch")
-st.plotly_chart(fig_throttle, width="stretch")
-st.plotly_chart(fig_brake, width="stretch")
+    # Delta time: gap to the fastest of the selected laps, over distance.
+    # Each driver's telemetry has its own Distance grid, so the others are
+    # interpolated onto the reference driver's grid before subtracting
+    # elapsed time -- the same idea as fastf1.utils.delta_time, done
+    # directly since that helper is deprecated and the library's own docs
+    # flag it as not very accurate.
+    reference_driver = min(laps_by_driver, key=lambda d: laps_by_driver[d]["LapTime"])
+    ref_tel = telemetry_by_driver[reference_driver]
+    ref_elapsed = (ref_tel["Time"] - ref_tel["Time"].iloc[0]).dt.total_seconds().to_numpy()
+    ref_distance_m = ref_tel["Distance"].to_numpy()
+    ref_distance = ref_distance_m * (M_TO_FT if imperial else 1)
+
+    fig_delta = base_figure("Delta time", f"s (vs. {reference_driver})", dist_title)
+    fig_delta.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.4)")
+
+    for driver in selected_drivers:
+        if driver == reference_driver:
+            continue
+        tel = telemetry_by_driver[driver]
+        color, dash = driver_style[driver]
+        elapsed = (tel["Time"] - tel["Time"].iloc[0]).dt.total_seconds().to_numpy()
+        elapsed_on_ref_grid = np.interp(ref_distance_m, tel["Distance"].to_numpy(), elapsed)
+        delta = elapsed_on_ref_grid - ref_elapsed
+        fig_delta.add_trace(
+            go.Scatter(
+                x=ref_distance, y=delta, name=f"{driver} vs {reference_driver}",
+                line=dict(color=color, dash=dash, width=2.5),
+                fill="tozeroy", fillcolor=hex_to_rgba(color, 0.15),
+                hovertemplate=f"{driver} vs {reference_driver}: %{{y:+.2f}} s · %{{x:.0f}} {dist_unit}<extra></extra>",
+            )
+        )
+
+    st.plotly_chart(fig_speed, width="stretch")
+    st.plotly_chart(fig_delta, width="stretch")
+    st.plotly_chart(fig_throttle, width="stretch")
+    st.plotly_chart(fig_brake, width="stretch")
+    st.plotly_chart(fig_gear, width="stretch")
+
+# ------------------------------------------------------------------ pace --
+
+with tab_pace:
+    try:
+        pace_laps = session.laps.pick_quicklaps()
+        pace_laps = pace_laps[pace_laps["TrackStatus"] == "1"]
+    except Exception:
+        pace_laps = session.laps.iloc[0:0]
+
+    compounds_with_data = [
+        c for c, g in pace_laps.groupby("Compound") if len(g) >= MIN_LAPS_FOR_TREND
+    ]
+
+    if not compounds_with_data:
+        st.info(
+            "Not enough green-flag laps on one compound in this session to fit a degradation "
+            "trend (typical for Qualifying, where laps are single push laps rather than a run)."
+        )
+    else:
+        st.caption(
+            "Lap time vs. tyre age, corrected for fuel load: a plain fit against tyre age alone "
+            "would conflate the tyre wearing in with the car simply getting lighter over the "
+            "run, so LapNumber is used as a fuel-burn proxy in a joint fit, and only the "
+            "tyre-age part of it is plotted here."
+        )
+
+        fig_pace = base_figure("Lap time vs. tyre age", "Lap time (s)", "Tyre life (laps)")
+
+        for (driver, stint), stint_laps in pace_laps.groupby(["Driver", "Stint"]):
+            if len(stint_laps) < 3:
+                continue
+            compound = stint_laps["Compound"].iloc[0]
+            color = COMPOUND_COLORS.get(compound, "#999999")
+            stint_laps = stint_laps.sort_values("TyreLife")
+            fig_pace.add_trace(
+                go.Scatter(
+                    x=stint_laps["TyreLife"],
+                    y=stint_laps["LapTime"].dt.total_seconds(),
+                    mode="lines+markers",
+                    marker=dict(size=4),
+                    line=dict(color=color, width=1),
+                    opacity=0.25,
+                    name=f"{driver} ({compound.title()})",
+                    showlegend=False,
+                    hovertemplate=f"{driver}: %{{y:.3f}} s at %{{x:.0f}} laps<extra></extra>",
+                )
+            )
+
+        coeffs = {}
+        for compound in compounds_with_data:
+            compound_laps = pace_laps[pace_laps["Compound"] == compound]
+            tyre_life = compound_laps["TyreLife"].to_numpy(dtype=float)
+            lap_number = compound_laps["LapNumber"].to_numpy(dtype=float)
+            lap_time = compound_laps["LapTime"].dt.total_seconds().to_numpy()
+            design = np.column_stack([tyre_life, lap_number, np.ones_like(tyre_life)])
+            (tyre_coef, fuel_coef, intercept), *_ = np.linalg.lstsq(design, lap_time, rcond=None)
+            coeffs[compound] = (tyre_coef, fuel_coef)
+
+            mean_lap_number = lap_number.mean()
+            x_fit = np.linspace(tyre_life.min(), tyre_life.max(), 2)
+            y_fit = tyre_coef * x_fit + fuel_coef * mean_lap_number + intercept
+            color = COMPOUND_COLORS.get(compound, "#999999")
+            fig_pace.add_trace(
+                go.Scatter(
+                    x=x_fit, y=y_fit, mode="lines", line=dict(color=color, width=4),
+                    name=f"{compound.title()} ({tyre_coef:+.3f} s/lap)",
+                    hovertemplate=f"{compound.title()}: %{{y:.3f}} s at %{{x:.0f}} laps<extra></extra>",
+                )
+            )
+
+        st.plotly_chart(fig_pace, width="stretch")
+
+        compound_choice = st.selectbox("Compound (per-driver breakdown)", options=compounds_with_data)
+        compound_laps = pace_laps[pace_laps["Compound"] == compound_choice]
+        fuel_coef = coeffs[compound_choice][1]
+
+        driver_slopes = {}
+        for driver, driver_laps in compound_laps.groupby("Driver"):
+            if len(driver_laps) < MIN_LAPS_PER_DRIVER:
+                continue
+            tyre_life = driver_laps["TyreLife"].to_numpy(dtype=float)
+            lap_number = driver_laps["LapNumber"].to_numpy(dtype=float)
+            lap_time = driver_laps["LapTime"].dt.total_seconds().to_numpy()
+            corrected_time = lap_time - fuel_coef * lap_number
+            tyre_coef, _ = np.polyfit(tyre_life, corrected_time, 1)
+            driver_slopes[driver] = tyre_coef
+
+        if not driver_slopes:
+            st.info(f"No driver ran enough laps on {compound_choice.title()} for a per-driver estimate.")
+        else:
+            ranked = sorted(driver_slopes.items(), key=lambda kv: kv[1])
+            fig_drivers = base_figure(
+                f"{compound_choice.title()} — degradation by driver", "Fuel-corrected degradation (s/lap)", ""
+            )
+            fig_drivers.update_layout(height=max(CHART_HEIGHT, 24 * len(ranked) + 100))
+            fig_drivers.add_vline(x=0, line_color="rgba(255,255,255,0.4)")
+            fig_drivers.add_trace(
+                go.Bar(
+                    x=[s for _, s in ranked],
+                    y=[d for d, _ in ranked],
+                    orientation="h",
+                    marker_color=COMPOUND_COLORS.get(compound_choice, "#999999"),
+                    hovertemplate="%{y}: %{x:+.3f} s/lap<extra></extra>",
+                )
+            )
+            fig_drivers.update_yaxes(autorange="reversed")
+            st.plotly_chart(fig_drivers, width="stretch")
