@@ -27,6 +27,15 @@ mkdir cache
   the coefficients blow up (this produced nonsense ±20-30 s/lap bars at first). The fix is to
   take the fuel slope from the pooled, well-conditioned fit and subtract it out of each driver's
   lap times before fitting their tyre slope alone.
-- `dashboard.py` — Streamlit app for head-to-head telemetry. Pick a session (Qualifying/Race)
-  and up to 3 drivers via a multiselect; compares their fastest lap as speed/throttle/brake
-  traces over distance. Run with `venv\Scripts\streamlit run dashboard.py`.
+- `dashboard.py` — Streamlit app for head-to-head telemetry. Pick a year, a Grand Prix, and one
+  of its actual sessions (the dropdown is built from that weekend's real `Session1..5` names in
+  the FastF1 schedule, so Sprint Qualifying/Sprint show up only on sprint weekends, and a normal
+  weekend shows Practice 1-3/Qualifying/Race), then up to 3 drivers via a multiselect. Charts:
+  speed, throttle, brake, and a delta-time chart (gap to the fastest of the selected laps,
+  computed by interpolating the other laps' elapsed time onto the reference lap's distance grid
+  — done directly with `numpy.interp` rather than `fastf1.utils.delta_time`, which the library's
+  own docs flag as deprecated and not very accurate). All four charts share one fixed height and
+  sit in a 2x2 grid. Data is fetched from the F1 API on first request for a given
+  year/event/session and cached locally after that (`cache/`) — there's no bulk pre-download of
+  every past race, new races just show up in the dropdown once they've happened and get fetched
+  the first time someone picks them. Run with `venv\Scripts\streamlit run dashboard.py`.
