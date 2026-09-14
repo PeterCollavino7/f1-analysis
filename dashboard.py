@@ -321,12 +321,24 @@ with tab_pace:
 
         coeffs = {}
         for compound in compounds_with_data:
-            compound_laps = pace_laps[pace_laps["Compound"] == compound]
+            compound_laps = pace_laps[pace_laps["Compound"] == compound].dropna(
+                subset=["TyreLife", "LapNumber", "LapTime"]
+            )
             tyre_life = compound_laps["TyreLife"].to_numpy(dtype=float)
             lap_number = compound_laps["LapNumber"].to_numpy(dtype=float)
             lap_time = compound_laps["LapTime"].dt.total_seconds().to_numpy()
             design = np.column_stack([tyre_life, lap_number, np.ones_like(tyre_life)])
-            (tyre_coef, fuel_coef, intercept), *_ = np.linalg.lstsq(design, lap_time, rcond=None)
+            finite_rows = np.isfinite(design).all(axis=1) & np.isfinite(lap_time)
+            design, tyre_life, lap_number, lap_time = (
+                design[finite_rows], tyre_life[finite_rows], lap_number[finite_rows], lap_time[finite_rows],
+            )
+            if len(lap_time) < MIN_LAPS_FOR_TREND:
+                continue
+            try:
+                (tyre_coef, fuel_coef, intercept), *_ = np.linalg.lstsq(design, lap_time, rcond=None)
+            except np.linalg.LinAlgError:
+                st.warning(f"Couldn't fit a degradation trend for {compound.title()} (bad/degenerate data).")
+                continue
             coeffs[compound] = (tyre_coef, fuel_coef)
 
             mean_lap_number = lap_number.mean()
@@ -343,19 +355,30 @@ with tab_pace:
 
         st.plotly_chart(fig_pace, width="stretch")
 
-        compound_choice = st.selectbox("Compound (per-driver breakdown)", options=compounds_with_data)
+        if not coeffs:
+            st.info("No compound had a usable degradation fit in this session.")
+            st.stop()
+
+        compound_choice = st.selectbox("Compound (per-driver breakdown)", options=list(coeffs.keys()))
         compound_laps = pace_laps[pace_laps["Compound"] == compound_choice]
         fuel_coef = coeffs[compound_choice][1]
 
         driver_slopes = {}
         for driver, driver_laps in compound_laps.groupby("Driver"):
+            driver_laps = driver_laps.dropna(subset=["TyreLife", "LapNumber", "LapTime"])
             if len(driver_laps) < MIN_LAPS_PER_DRIVER:
                 continue
             tyre_life = driver_laps["TyreLife"].to_numpy(dtype=float)
             lap_number = driver_laps["LapNumber"].to_numpy(dtype=float)
             lap_time = driver_laps["LapTime"].dt.total_seconds().to_numpy()
             corrected_time = lap_time - fuel_coef * lap_number
-            tyre_coef, _ = np.polyfit(tyre_life, corrected_time, 1)
+            finite_rows = np.isfinite(tyre_life) & np.isfinite(corrected_time)
+            if finite_rows.sum() < MIN_LAPS_PER_DRIVER or np.unique(tyre_life[finite_rows]).size < 2:
+                continue
+            try:
+                tyre_coef, _ = np.polyfit(tyre_life[finite_rows], corrected_time[finite_rows], 1)
+            except np.linalg.LinAlgError:
+                continue
             driver_slopes[driver] = tyre_coef
 
         if not driver_slopes:
