@@ -93,6 +93,33 @@ def hex_to_rgba(hex_color, alpha):
     return f"rgba({r},{g},{b},{alpha})"
 
 
+def order_by_classification(session, drivers):
+    """Finishing/classification order (P1 first) when available -- falls
+    back to alphabetical for sessions with no classification yet, like
+    Practice, or for any driver missing from it."""
+    try:
+        pos = session.results.set_index("Abbreviation")["Position"].dropna()
+        ordered = [d for d in pos.sort_values().index if d in drivers]
+    except Exception:
+        ordered = []
+    remaining = sorted(d for d in drivers if d not in ordered)
+    return ordered + remaining
+
+
+def build_driver_styles(drivers, session):
+    """Real team colors -- but teammates (e.g. LEC/HAM at Ferrari) then
+    share the exact same color, which defeats a chart that's meant to tell
+    drivers apart. Whoever repeats a color gets a dashed/dotted line."""
+    styles = {}
+    seen_colors = {}
+    for driver in drivers:
+        color = fastf1.plotting.get_driver_color(driver, session)
+        dash = LINE_STYLES[seen_colors.get(color, 0) % len(LINE_STYLES)]
+        seen_colors[color] = seen_colors.get(color, 0) + 1
+        styles[driver] = (color, dash)
+    return styles
+
+
 def base_figure(title, yaxis_title, xaxis_title, hovermode="x"):
     fig = go.Figure()
     fig.update_layout(
@@ -154,18 +181,7 @@ with tab_telemetry:
     laps_by_driver = {d: session.laps.pick_drivers(d).pick_fastest() for d in selected_drivers}
     telemetry_by_driver = {d: lap.get_car_data().add_distance() for d, lap in laps_by_driver.items()}
 
-    # Real team colors, like FastF1's own plotting module uses -- but two
-    # selected teammates (e.g. LEC/HAM at Ferrari) then share the exact same
-    # color, which defeats the point of a head-to-head chart. When that
-    # happens, later drivers with a repeated color get a dashed/dotted line
-    # instead of a second solid line of the same color.
-    driver_style = {}
-    seen_colors = {}
-    for driver in selected_drivers:
-        color = fastf1.plotting.get_driver_color(driver, session)
-        dash = LINE_STYLES[seen_colors.get(color, 0)]
-        seen_colors[color] = seen_colors.get(color, 0) + 1
-        driver_style[driver] = (color, dash)
+    driver_style = build_driver_styles(selected_drivers, session)
 
     cards = st.columns(len(selected_drivers))
     for col, driver in zip(cards, selected_drivers):
@@ -307,6 +323,80 @@ with tab_telemetry:
 # ------------------------------------------------------------------ pace --
 
 with tab_pace:
+    position_laps = session.laps.dropna(subset=["Position", "LapNumber"])
+    if position_laps.empty:
+        st.info("No lap-by-lap position data available for this session.")
+    else:
+        st.caption("Position at the end of each lap, for the whole field.")
+        field_order = order_by_classification(session, position_laps["Driver"].unique())
+        field_style = build_driver_styles(field_order, session)
+        max_lap = position_laps["LapNumber"].max()
+
+        fig_position = base_figure("Race position by lap", "Position", "Lap")
+        fig_position.update_yaxes(autorange="reversed", dtick=1)
+        fig_position.update_xaxes(range=[position_laps["LapNumber"].min() - 1, max_lap + 3])
+        fig_position.update_layout(height=max(CHART_HEIGHT, 22 * len(field_order)), showlegend=False)
+
+        for driver in field_order:
+            driver_laps = position_laps[position_laps["Driver"] == driver].sort_values("LapNumber")
+            color, dash = field_style[driver]
+            hover_text = [
+                f"{driver}: P{p:.0f} on lap {l:.0f}"
+                for p, l in zip(driver_laps["Position"], driver_laps["LapNumber"])
+            ]
+            fig_position.add_trace(
+                go.Scatter(
+                    x=driver_laps["LapNumber"], y=driver_laps["Position"], mode="lines",
+                    line=dict(color=color, dash=dash, width=2), text=hover_text,
+                    hovertemplate="%{text}<extra></extra>",
+                )
+            )
+            last = driver_laps.iloc[-1]
+            fig_position.add_annotation(
+                x=last["LapNumber"], y=last["Position"], text=driver, showarrow=False,
+                xanchor="left", xshift=6, font=dict(size=10, color=color),
+            )
+
+        st.plotly_chart(fig_position, width="stretch")
+
+    st.divider()
+
+    strategy_laps = session.laps.dropna(subset=["Stint", "Compound", "LapNumber"])
+    if strategy_laps.empty:
+        st.info("No stint data available for a strategy timeline in this session.")
+    else:
+        st.caption("Tyre strategy: which compound each driver ran, and for how long.")
+        strategy_order = order_by_classification(session, strategy_laps["Driver"].unique())
+
+        fig_strategy = base_figure("Tyre strategy", "", "Lap")
+        fig_strategy.update_layout(
+            height=max(CHART_HEIGHT, 22 * len(strategy_order)), barmode="stack", showlegend=False,
+        )
+        fig_strategy.update_yaxes(categoryorder="array", categoryarray=list(reversed(strategy_order)))
+
+        shown_compounds = set()
+        for driver, driver_laps in strategy_laps.groupby("Driver"):
+            for stint, stint_laps in driver_laps.groupby("Stint"):
+                compound = stint_laps["Compound"].iloc[0]
+                start = stint_laps["LapNumber"].min()
+                length = stint_laps["LapNumber"].max() - start + 1
+                color = COMPOUND_COLORS.get(compound, "#999999")
+                fig_strategy.add_trace(
+                    go.Bar(
+                        x=[length], y=[driver], base=[start - 1], orientation="h",
+                        marker=dict(color=color, line=dict(color="rgba(0,0,0,0.4)", width=1)),
+                        name=compound.title(), legendgroup=compound, showlegend=compound not in shown_compounds,
+                        text=[f"{driver}: {compound.title()}, laps {start:.0f}-{start + length - 1:.0f}"],
+                        hovertemplate="%{text}<extra></extra>",
+                    )
+                )
+                shown_compounds.add(compound)
+
+        fig_strategy.update_layout(showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        st.plotly_chart(fig_strategy, width="stretch")
+
+    st.divider()
+
     try:
         pace_laps = session.laps.pick_quicklaps()
         pace_laps = pace_laps[pace_laps["TrackStatus"] == "1"]
