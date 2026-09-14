@@ -7,6 +7,8 @@ drivers; compares their fastest lap in that session.
 
 Run with: venv\\Scripts\\streamlit run dashboard.py
 """
+import datetime
+
 import fastf1
 import numpy as np
 import plotly.graph_objects as go
@@ -28,7 +30,14 @@ YEARS = list(range(2026, 2017, -1))
 @st.cache_data(ttl=3600)
 def load_schedule(year):
     schedule = fastf1.get_event_schedule(year)
-    return schedule[schedule["RoundNumber"] > 0]
+    schedule = schedule[schedule["RoundNumber"] > 0]
+    # Only weekends that have actually happened -- a future round on the
+    # calendar has no session data yet, so it has no business in the
+    # dropdown. Session5 is the last session of the weekend (Race, or Sprint
+    # weekends still end on Race), so its time is the real "is this done".
+    now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    schedule = schedule[schedule["Session5DateUtc"] <= now_utc]
+    return schedule.sort_values("RoundNumber")
 
 
 @st.cache_data
@@ -145,10 +154,7 @@ for driver in selected_drivers:
         go.Scatter(x=ref_distance, y=delta, name=f"{driver} vs {reference_driver}", line=dict(color=colors[driver]))
     )
 
-row1_left, row1_right = st.columns(2)
-row1_left.plotly_chart(fig_speed, width="stretch")
-row1_right.plotly_chart(fig_delta, width="stretch")
-
-row2_left, row2_right = st.columns(2)
-row2_left.plotly_chart(fig_throttle, width="stretch")
-row2_right.plotly_chart(fig_brake, width="stretch")
+st.plotly_chart(fig_speed, width="stretch")
+st.plotly_chart(fig_delta, width="stretch")
+st.plotly_chart(fig_throttle, width="stretch")
+st.plotly_chart(fig_brake, width="stretch")
