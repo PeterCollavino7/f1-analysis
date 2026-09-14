@@ -191,6 +191,40 @@ with tab_telemetry:
 
     st.write("")
 
+    # Every driver's telemetry is sampled at its own, slightly different
+    # distance points, so hovering used to show each trace's own nearest
+    # sample (e.g. ALB at 926m, ANT at 911m) instead of the same point on
+    # track. Fixed by resampling every signal for every driver onto one
+    # shared distance grid up front, so every trace has a value at exactly
+    # the same distance and hovering always compares the same point.
+    common_max_distance = min(tel["Distance"].max() for tel in telemetry_by_driver.values())
+    common_distance_m = np.linspace(0, common_max_distance, 3000)
+
+    def resample_linear(tel, column):
+        return np.interp(common_distance_m, tel["Distance"].to_numpy(), tel[column].to_numpy())
+
+    def resample_step(tel, column):
+        # Continuous interpolation would invent fractional gears / brake
+        # states between samples; hold the last known value instead.
+        x = tel["Distance"].to_numpy()
+        y = tel[column].to_numpy()
+        idx = np.clip(np.searchsorted(x, common_distance_m, side="right") - 1, 0, len(y) - 1)
+        return y[idx]
+
+    resampled = {}
+    for driver, tel in telemetry_by_driver.items():
+        elapsed = (tel["Time"] - tel["Time"].iloc[0]).dt.total_seconds()
+        elapsed_tel = tel.assign(_Elapsed=elapsed)
+        resampled[driver] = {
+            "Speed": resample_linear(tel, "Speed"),
+            "Throttle": resample_linear(tel, "Throttle"),
+            "Brake": resample_step(tel, "Brake").astype(int),
+            "nGear": resample_step(tel, "nGear"),
+            "Elapsed": resample_linear(elapsed_tel, "_Elapsed"),
+        }
+
+    common_distance = common_distance_m * (M_TO_FT if imperial else 1)
+
     dist_title = f"Distance ({dist_unit})"
     fig_speed = base_figure("Speed", speed_unit, dist_title)
     fig_throttle = base_figure("Throttle", "%", dist_title)
@@ -200,27 +234,26 @@ with tab_telemetry:
     fig_gear.update_yaxes(tickvals=list(range(1, 9)), range=[0.5, 8.5])
 
     for driver in selected_drivers:
-        tel = telemetry_by_driver[driver]
         color, dash = driver_style[driver]
-        distance = tel["Distance"] * (M_TO_FT if imperial else 1)
-        speed = tel["Speed"] * (KM_TO_MI if imperial else 1)
+        speed = resampled[driver]["Speed"] * (KM_TO_MI if imperial else 1)
 
         fig_speed.add_trace(
             go.Scatter(
-                x=distance, y=speed, name=driver, line=dict(color=color, dash=dash, width=2.5),
+                x=common_distance, y=speed, name=driver, line=dict(color=color, dash=dash, width=2.5),
                 hovertemplate=f"{driver}: %{{y:.2f}} {speed_unit} · %{{x:.0f}} {dist_unit}<extra></extra>",
             )
         )
         fig_throttle.add_trace(
             go.Scatter(
-                x=distance, y=tel["Throttle"], name=driver, line=dict(color=color, dash=dash, width=2.5),
+                x=common_distance, y=resampled[driver]["Throttle"], name=driver,
+                line=dict(color=color, dash=dash, width=2.5),
                 hovertemplate=f"{driver}: %{{y:.0f}}% · %{{x:.0f}} {dist_unit}<extra></extra>",
             )
         )
-        brake_state = np.where(tel["Brake"], "On", "Off")
+        brake_state = np.where(resampled[driver]["Brake"], "On", "Off")
         fig_brake.add_trace(
             go.Scatter(
-                x=distance, y=tel["Brake"].astype(int), name=driver,
+                x=common_distance, y=resampled[driver]["Brake"], name=driver,
                 line=dict(color=color, dash=dash, width=2.5, shape="hv"),
                 text=brake_state,
                 hovertemplate=f"{driver}: " + "%{text}" + f" · %{{x:.0f}} {dist_unit}<extra></extra>",
@@ -228,22 +261,17 @@ with tab_telemetry:
         )
         fig_gear.add_trace(
             go.Scatter(
-                x=distance, y=tel["nGear"], name=driver, line=dict(color=color, dash=dash, width=2.5, shape="hv"),
+                x=common_distance, y=resampled[driver]["nGear"], name=driver,
+                line=dict(color=color, dash=dash, width=2.5, shape="hv"),
                 hovertemplate=f"{driver}: gear %{{y:.0f}} · %{{x:.0f}} {dist_unit}<extra></extra>",
             )
         )
 
-    # Delta time: gap to the fastest of the selected laps, over distance.
-    # Each driver's telemetry has its own Distance grid, so the others are
-    # interpolated onto the reference driver's grid before subtracting
-    # elapsed time -- the same idea as fastf1.utils.delta_time, done
-    # directly since that helper is deprecated and the library's own docs
-    # flag it as not very accurate.
+    # Delta time: gap to the fastest of the selected laps, over distance --
+    # same shared grid, so this is now just a subtraction instead of its own
+    # separate interpolation step.
     reference_driver = min(laps_by_driver, key=lambda d: laps_by_driver[d]["LapTime"])
-    ref_tel = telemetry_by_driver[reference_driver]
-    ref_elapsed = (ref_tel["Time"] - ref_tel["Time"].iloc[0]).dt.total_seconds().to_numpy()
-    ref_distance_m = ref_tel["Distance"].to_numpy()
-    ref_distance = ref_distance_m * (M_TO_FT if imperial else 1)
+    ref_elapsed = resampled[reference_driver]["Elapsed"]
 
     fig_delta = base_figure("Delta time", f"s (vs. {reference_driver})", dist_title)
     fig_delta.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.4)")
@@ -251,14 +279,11 @@ with tab_telemetry:
     for driver in selected_drivers:
         if driver == reference_driver:
             continue
-        tel = telemetry_by_driver[driver]
         color, dash = driver_style[driver]
-        elapsed = (tel["Time"] - tel["Time"].iloc[0]).dt.total_seconds().to_numpy()
-        elapsed_on_ref_grid = np.interp(ref_distance_m, tel["Distance"].to_numpy(), elapsed)
-        delta = elapsed_on_ref_grid - ref_elapsed
+        delta = resampled[driver]["Elapsed"] - ref_elapsed
         fig_delta.add_trace(
             go.Scatter(
-                x=ref_distance, y=delta, name=f"{driver} vs {reference_driver}",
+                x=common_distance, y=delta, name=f"{driver} vs {reference_driver}",
                 line=dict(color=color, dash=dash, width=2.5),
                 fill="tozeroy", fillcolor=hex_to_rgba(color, 0.15),
                 hovertemplate=f"{driver} vs {reference_driver}: %{{y:+.3f}} s · %{{x:.0f}} {dist_unit}<extra></extra>",
@@ -297,27 +322,35 @@ with tab_pace:
             "tyre-age part of it is plotted here."
         )
 
+        pace_driver_options = sorted(pace_laps["Driver"].unique())
+        pace_drivers = st.multiselect(
+            "Show individual laps for", options=pace_driver_options, default=[], key="pace_drivers"
+        )
+
         fig_pace = base_figure("Lap time vs. tyre age", "Lap time (s)", "Tyre life (laps)")
 
-        for (driver, stint), stint_laps in pace_laps.groupby(["Driver", "Stint"]):
-            if len(stint_laps) < 3:
-                continue
-            compound = stint_laps["Compound"].iloc[0]
-            color = COMPOUND_COLORS.get(compound, "#999999")
-            stint_laps = stint_laps.sort_values("TyreLife")
-            fig_pace.add_trace(
-                go.Scatter(
-                    x=stint_laps["TyreLife"],
-                    y=stint_laps["LapTime"].dt.total_seconds(),
-                    mode="lines+markers",
-                    marker=dict(size=4),
-                    line=dict(color=color, width=1),
-                    opacity=0.25,
-                    name=f"{driver} ({compound.title()})",
-                    showlegend=False,
-                    hovertemplate=f"{driver}: %{{y:.3f}} s at %{{x:.0f}} laps<extra></extra>",
+        if pace_drivers:
+            for (driver, stint), stint_laps in pace_laps[pace_laps["Driver"].isin(pace_drivers)].groupby(
+                ["Driver", "Stint"]
+            ):
+                if len(stint_laps) < 3:
+                    continue
+                compound = stint_laps["Compound"].iloc[0]
+                color = COMPOUND_COLORS.get(compound, "#999999")
+                stint_laps = stint_laps.sort_values("TyreLife")
+                fig_pace.add_trace(
+                    go.Scatter(
+                        x=stint_laps["TyreLife"],
+                        y=stint_laps["LapTime"].dt.total_seconds(),
+                        mode="lines+markers",
+                        marker=dict(size=5),
+                        line=dict(color=color, width=2),
+                        name=f"{driver} ({compound.title()})",
+                        hovertemplate=f"{driver}: %{{y:.3f}} s at %{{x:.0f}} laps<extra></extra>",
+                    )
                 )
-            )
+        else:
+            st.caption("Pick one or more drivers above to see their individual laps under the trend lines.")
 
         coeffs = {}
         for compound in compounds_with_data:
