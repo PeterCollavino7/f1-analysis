@@ -351,15 +351,20 @@ with tab_pace:
                 compound = stint_laps["Compound"].iloc[0]
                 color = COMPOUND_COLORS.get(compound, "#999999")
                 stint_laps = stint_laps.sort_values("TyreLife")
+                lap_times = stint_laps["LapTime"].dt.total_seconds()
+                hover_text = [
+                    f"{driver}: {t:.3f} s at {tl:.0f} laps" for t, tl in zip(lap_times, stint_laps["TyreLife"])
+                ]
                 fig_pace.add_trace(
                     go.Scatter(
                         x=stint_laps["TyreLife"],
-                        y=stint_laps["LapTime"].dt.total_seconds(),
+                        y=lap_times,
                         mode="lines+markers",
                         marker=dict(size=5),
                         line=dict(color=color, width=2),
                         name=f"{driver} ({compound.title()})",
-                        hovertemplate=f"{driver}: %{{y:.3f}} s at %{{x:.0f}} laps<extra></extra>",
+                        text=hover_text,
+                        hovertemplate="%{text}<extra></extra>",
                     )
                 )
         else:
@@ -391,11 +396,13 @@ with tab_pace:
             x_fit = np.linspace(tyre_life.min(), tyre_life.max(), 2)
             y_fit = tyre_coef * x_fit + fuel_coef * mean_lap_number + intercept
             color = COMPOUND_COLORS.get(compound, "#999999")
+            trend_text = [f"{compound.title()}: {t:.3f} s at {tl:.0f} laps" for t, tl in zip(y_fit, x_fit)]
             fig_pace.add_trace(
                 go.Scatter(
                     x=x_fit, y=y_fit, mode="lines", line=dict(color=color, width=4),
                     name=f"{compound.title()} ({tyre_coef:+.3f} s/lap)",
-                    hovertemplate=f"{compound.title()}: %{{y:.3f}} s at %{{x:.0f}} laps<extra></extra>",
+                    text=trend_text,
+                    hovertemplate="%{text}<extra></extra>",
                 )
             )
 
@@ -442,7 +449,8 @@ with tab_pace:
                     y=[d for d, _ in ranked],
                     orientation="h",
                     marker_color=COMPOUND_COLORS.get(compound_choice, "#999999"),
-                    hovertemplate="%{y}: %{x:+.3f} s/lap<extra></extra>",
+                    text=[f"{d}: {s:+.3f} s/lap" for d, s in ranked],
+                    hovertemplate="%{text}<extra></extra>",
                 )
             )
             fig_drivers.update_yaxes(autorange="reversed")
