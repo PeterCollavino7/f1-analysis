@@ -490,6 +490,49 @@ with tab_pace:
 
     st.divider()
 
+    overtake_laps = session.laps.dropna(subset=["Position", "LapNumber"])
+    if overtake_laps.empty:
+        st.info("No lap-by-lap position data available to count overtakes in this session.")
+    else:
+        st.caption(
+            "Overtakes (approximate): on-track position gains, lap over lap, excluding laps "
+            "affected by that driver's own pit stop. A position swing caused by *another* "
+            "driver's pit stop is still counted, since telling that apart from a real pass "
+            "isn't reliably possible from this data -- treat this as an approximation, not an "
+            "official count."
+        )
+        overtake_counts = {}
+        for driver, dl in overtake_laps.sort_values("LapNumber").groupby("Driver"):
+            prev_position = dl["Position"].shift(1)
+            pitted_this_lap = dl["PitInTime"].notna() | dl["PitOutTime"].notna()
+            pitted_prev_lap = pitted_this_lap.shift(1, fill_value=False)
+            gain = (prev_position - dl["Position"]).clip(lower=0)
+            clean_gain = gain.where(~(pitted_this_lap | pitted_prev_lap), 0)
+            overtake_counts[driver] = int(clean_gain.fillna(0).sum())
+
+        ranked_overtakes = sorted(overtake_counts.items(), key=lambda kv: kv[1], reverse=True)
+        ranked_overtakes = [(d, c) for d, c in ranked_overtakes if c > 0]
+        if not ranked_overtakes:
+            st.info("No on-track position gains detected in this session.")
+        else:
+            overtake_styles = build_driver_styles([d for d, _ in ranked_overtakes], session)
+            fig_overtakes = base_figure("Overtakes by driver (approximate)", "Position gains", "")
+            fig_overtakes.update_layout(height=max(CHART_HEIGHT, 24 * len(ranked_overtakes)), showlegend=False)
+            fig_overtakes.add_trace(
+                go.Bar(
+                    x=[c for _, c in ranked_overtakes],
+                    y=[d for d, _ in ranked_overtakes],
+                    orientation="h",
+                    marker_color=[overtake_styles[d][0] for d, _ in ranked_overtakes],
+                    text=[f"{d}: {c}" for d, c in ranked_overtakes],
+                    hovertemplate="%{text}<extra></extra>",
+                )
+            )
+            fig_overtakes.update_yaxes(autorange="reversed")
+            st.plotly_chart(fig_overtakes, width="stretch")
+
+    st.divider()
+
     try:
         pace_laps = session.laps.pick_quicklaps()
         pace_laps = pace_laps[pace_laps["TrackStatus"] == "1"]
