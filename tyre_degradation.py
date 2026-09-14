@@ -49,23 +49,39 @@ for (driver, stint), stint_laps in laps.groupby(["Driver", "Stint"]):
         linewidth=1,
     )
 
-# Per-compound linear degradation trend, fit across all stints of that
-# compound, to show the overall slope through the per-lap scatter.
+# Per-compound degradation trend, controlled for fuel load. Raw lap time vs.
+# tyre age (fit in the first version of this script) conflates two effects:
+# the tyre wearing in, and the car getting lighter as the race goes on. Since
+# FastF1 doesn't expose fuel mass directly, LapNumber is used as its proxy
+# (fuel burns off roughly linearly with laps completed) and a multiple linear
+# regression LapTime ~ TyreLife + LapNumber separates the two: the TyreLife
+# coefficient is then the degradation slope with fuel effect held constant,
+# instead of the fuel effect leaking into it.
+print(f"{'Compound':<8} {'tyre s/lap':>12} {'fuel+track s/lap':>18}")
 for compound, compound_laps in laps.groupby("Compound"):
     if len(compound_laps) < 10:
         continue
-    x = compound_laps["TyreLife"].to_numpy()
-    y = compound_laps["LapTime"].dt.total_seconds().to_numpy()
-    slope, intercept = np.polyfit(x, y, 1)
-    x_fit = np.linspace(x.min(), x.max(), 2)
+    tyre_life = compound_laps["TyreLife"].to_numpy(dtype=float)
+    lap_number = compound_laps["LapNumber"].to_numpy(dtype=float)
+    lap_time = compound_laps["LapTime"].dt.total_seconds().to_numpy()
+
+    design = np.column_stack([tyre_life, lap_number, np.ones_like(tyre_life)])
+    (tyre_coef, lap_coef, intercept), *_ = np.linalg.lstsq(design, lap_time, rcond=None)
+    print(f"{compound:<8} {tyre_coef:>+12.3f} {lap_coef:>+18.3f}")
+
+    # Trend line at the compound's mean lap number, so it isolates the tyre
+    # effect instead of also drifting with race progression.
+    mean_lap_number = lap_number.mean()
+    x_fit = np.linspace(tyre_life.min(), tyre_life.max(), 2)
+    y_fit = tyre_coef * x_fit + lap_coef * mean_lap_number + intercept
     color = compound_colors.get(compound, "black")
     ax.plot(
         x_fit,
-        slope * x_fit + intercept,
+        y_fit,
         color=color,
         linewidth=3,
         solid_capstyle="round",
-        label=f"{compound} ({slope:+.2f} s/lap)",
+        label=f"{compound} ({tyre_coef:+.2f} s/lap, fuel-corrected)",
     )
 
 ax.legend(title="Compound (degradation trend)")
