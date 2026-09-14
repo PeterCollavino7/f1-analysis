@@ -338,9 +338,21 @@ with tab_pace:
         fig_pace = base_figure("Lap time vs. tyre age", "Lap time (s)", "Tyre life (laps)")
 
         if pace_drivers:
-            for (driver, stint), stint_laps in pace_laps[pace_laps["Driver"].isin(pace_drivers)].groupby(
-                ["Driver", "Stint"]
-            ):
+            shown_stints = pace_laps[pace_laps["Driver"].isin(pace_drivers)].groupby(["Driver", "Stint"])
+            # A driver can run the same compound in two separate stints (e.g.
+            # medium-hard-medium) -- both would otherwise get the same name
+            # and color and read as one noisy zigzagging line instead of two
+            # clean ones, so count occurrences per driver+compound and number
+            # them once there's more than one.
+            stint_counts = {}
+            for (driver, stint), stint_laps in shown_stints:
+                if len(stint_laps) < 3:
+                    continue
+                compound = stint_laps["Compound"].iloc[0]
+                stint_counts[(driver, compound)] = stint_counts.get((driver, compound), 0) + 1
+
+            seen = {}
+            for (driver, stint), stint_laps in shown_stints:
                 if len(stint_laps) < 3:
                     continue
                 compound = stint_laps["Compound"].iloc[0]
@@ -350,14 +362,18 @@ with tab_pace:
                 hover_text = [
                     f"{driver}: {t:.3f} s at {tl:.0f} laps" for t, tl in zip(lap_times, stint_laps["TyreLife"])
                 ]
+                label = f"{driver} ({compound.title()})"
+                if stint_counts[(driver, compound)] > 1:
+                    seen[(driver, compound)] = seen.get((driver, compound), 0) + 1
+                    label += f" #{seen[(driver, compound)]}"
                 fig_pace.add_trace(
                     go.Scatter(
                         x=stint_laps["TyreLife"],
                         y=lap_times,
                         mode="lines+markers",
                         marker=dict(size=5),
-                        line=dict(color=color, width=2),
-                        name=f"{driver} ({compound.title()})",
+                        line=dict(color=color, width=2.5),
+                        name=label,
                         text=hover_text,
                         hovertemplate="%{text}<extra></extra>",
                     )
@@ -392,15 +408,20 @@ with tab_pace:
             y_fit = tyre_coef * x_fit + fuel_coef * mean_lap_number + intercept
             color = COMPOUND_COLORS.get(compound, "#999999")
             trend_text = [f"{compound.title()}: {t:.3f} s at {tl:.0f} laps" for t, tl in zip(y_fit, x_fit)]
+            # Fit on the whole field, not just whichever drivers are shown
+            # above, so it's often a wider tyre-life range than what's
+            # plotted for one driver -- dashed and thinner so it reads as
+            # background reference rather than competing with the raw laps.
             fig_pace.add_trace(
                 go.Scatter(
-                    x=x_fit, y=y_fit, mode="lines", line=dict(color=color, width=4),
+                    x=x_fit, y=y_fit, mode="lines", line=dict(color=color, width=2, dash="dot"),
                     name=f"{compound.title()} ({tyre_coef:+.3f} s/lap)",
                     text=trend_text,
                     hovertemplate="%{text}<extra></extra>",
                 )
             )
 
+        fig_pace.update_layout(legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02))
         st.plotly_chart(fig_pace, width="stretch")
 
         if not coeffs:
