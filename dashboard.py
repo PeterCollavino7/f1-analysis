@@ -11,6 +11,7 @@ import fastf1.plotting
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 fastf1.Cache.enable_cache("cache")
 
@@ -201,6 +202,41 @@ with tab_telemetry:
         )
 
     st.write("")
+
+    st.caption("Track map colored by speed. One panel per driver, same speed scale on all of them.")
+    fig_map = make_subplots(rows=1, cols=len(selected_drivers), subplot_titles=selected_drivers, horizontal_spacing=0.04)
+    map_speeds = {d: lap.get_telemetry() for d, lap in laps_by_driver.items()}
+    all_speeds = np.concatenate(
+        [(t["Speed"] * (KM_TO_MI if imperial else 1)).to_numpy() for t in map_speeds.values()]
+    )
+    speed_range = [all_speeds.min(), all_speeds.max()]
+
+    for i, driver in enumerate(selected_drivers, start=1):
+        tel = map_speeds[driver]
+        speed = tel["Speed"] * (KM_TO_MI if imperial else 1)
+        is_last = i == len(selected_drivers)
+        fig_map.add_trace(
+            go.Scatter(
+                x=tel["X"], y=tel["Y"], mode="markers",
+                marker=dict(
+                    size=4, color=speed, colorscale="Turbo", cmin=speed_range[0], cmax=speed_range[1],
+                    showscale=is_last, colorbar=dict(title=speed_unit) if is_last else None,
+                ),
+                text=[f"{driver}: {s:.2f} {speed_unit}" for s in speed],
+                hovertemplate="%{text}<extra></extra>",
+                showlegend=False,
+            ),
+            row=1, col=i,
+        )
+        x_axis_id = "x" if i == 1 else f"x{i}"
+        fig_map.update_xaxes(visible=False, row=1, col=i)
+        fig_map.update_yaxes(visible=False, scaleanchor=x_axis_id, scaleratio=1, row=1, col=i)
+
+    fig_map.update_layout(
+        height=CHART_HEIGHT + 60, margin=dict(t=40, b=10),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig_map, width="stretch")
 
     # Every driver's telemetry is sampled at its own, slightly different
     # distance points, so hovering used to show each trace's own nearest
