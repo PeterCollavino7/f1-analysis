@@ -11,7 +11,6 @@ import fastf1.plotting
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
-from plotly.subplots import make_subplots
 
 fastf1.Cache.enable_cache("cache")
 
@@ -203,41 +202,6 @@ with tab_telemetry:
 
     st.write("")
 
-    st.caption("Track map colored by speed. One panel per driver, same speed scale on all of them.")
-    fig_map = make_subplots(rows=1, cols=len(selected_drivers), subplot_titles=selected_drivers, horizontal_spacing=0.04)
-    map_speeds = {d: lap.get_telemetry() for d, lap in laps_by_driver.items()}
-    all_speeds = np.concatenate(
-        [(t["Speed"] * (KM_TO_MI if imperial else 1)).to_numpy() for t in map_speeds.values()]
-    )
-    speed_range = [all_speeds.min(), all_speeds.max()]
-
-    for i, driver in enumerate(selected_drivers, start=1):
-        tel = map_speeds[driver]
-        speed = tel["Speed"] * (KM_TO_MI if imperial else 1)
-        is_last = i == len(selected_drivers)
-        fig_map.add_trace(
-            go.Scatter(
-                x=tel["X"], y=tel["Y"], mode="markers",
-                marker=dict(
-                    size=4, color=speed, colorscale="Turbo", cmin=speed_range[0], cmax=speed_range[1],
-                    showscale=is_last, colorbar=dict(title=speed_unit) if is_last else None,
-                ),
-                text=[f"{driver}: {s:.2f} {speed_unit}" for s in speed],
-                hovertemplate="%{text}<extra></extra>",
-                showlegend=False,
-            ),
-            row=1, col=i,
-        )
-        x_axis_id = "x" if i == 1 else f"x{i}"
-        fig_map.update_xaxes(visible=False, row=1, col=i)
-        fig_map.update_yaxes(visible=False, scaleanchor=x_axis_id, scaleratio=1, row=1, col=i)
-
-    fig_map.update_layout(
-        height=CHART_HEIGHT + 60, margin=dict(t=40, b=10),
-        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-    )
-    st.plotly_chart(fig_map, width="stretch")
-
     # Every driver's telemetry is sampled at its own, slightly different
     # distance points, so hovering used to show each trace's own nearest
     # sample (e.g. ALB at 926m, ANT at 911m) instead of the same point on
@@ -269,6 +233,61 @@ with tab_telemetry:
             "nGear": resample_step(tel, "nGear"),
             "Elapsed": resample_linear(elapsed_tel, "_Elapsed"),
         }
+
+    st.caption(
+        "Track dominance: color shows which of two drivers is faster at each point on the lap "
+        "(a real corner-by-corner read on downforce/drag tradeoffs, not just overall pace)."
+    )
+    if len(selected_drivers) < 2:
+        st.info("Select at least 2 drivers to see the dominance map.")
+    else:
+        dom_a, dom_b = selected_drivers[0], selected_drivers[1]
+        if len(selected_drivers) > 2:
+            st.caption(f"Comparing {dom_a} vs {dom_b} (this map compares two drivers at a time).")
+
+        # Reuses the already-resampled, shared-grid speeds from above for the
+        # comparison; only X/Y position needs its own resampling here, onto
+        # that same grid, using the same resample_linear() helper.
+        tel_a = laps_by_driver[dom_a].get_telemetry()
+        x_on_grid = resample_linear(tel_a, "X")
+        y_on_grid = resample_linear(tel_a, "Y")
+
+        speed_a = resampled[dom_a]["Speed"]
+        speed_b = resampled[dom_b]["Speed"]
+        speed_a_disp = speed_a * (KM_TO_MI if imperial else 1)
+        speed_b_disp = speed_b * (KM_TO_MI if imperial else 1)
+        color_a, _ = driver_style[dom_a]
+        color_b, _ = driver_style[dom_b]
+
+        faster = np.where(speed_a >= speed_b, 0, 1)
+        dom_text = [
+            f"{dom_a}: {sa:.2f} {speed_unit} · {dom_b}: {sb:.2f} {speed_unit}"
+            for sa, sb in zip(speed_a_disp, speed_b_disp)
+        ]
+
+        fig_dom = go.Figure()
+        fig_dom.add_trace(
+            go.Scatter(
+                x=x_on_grid, y=y_on_grid, mode="markers",
+                marker=dict(
+                    size=5, color=faster, cmin=0, cmax=1,
+                    colorscale=[[0, color_a], [0.5, color_a], [0.5, color_b], [1, color_b]],
+                ),
+                text=dom_text, hovertemplate="%{text}<extra></extra>", showlegend=False,
+            )
+        )
+        fig_dom.update_xaxes(visible=False)
+        fig_dom.update_yaxes(visible=False, scaleanchor="x", scaleratio=1)
+        fig_dom.update_layout(
+            height=CHART_HEIGHT + 80, margin=dict(t=20, b=10),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        )
+        st.plotly_chart(fig_dom, width="stretch")
+        st.markdown(
+            f'<span style="color:{color_a}">●</span> {dom_a} faster'
+            f'&nbsp;&nbsp;&nbsp;<span style="color:{color_b}">●</span> {dom_b} faster',
+            unsafe_allow_html=True,
+        )
 
     common_distance = common_distance_m * (M_TO_FT if imperial else 1)
     # A numeric axis (not the earlier "1,346 m" string-label trick): that
