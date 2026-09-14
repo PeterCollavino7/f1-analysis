@@ -27,3 +27,6 @@ mkdir cache
   the coefficients blow up (this produced nonsense ±20-30 s/lap bars at first). The fix is to
   take the fuel slope from the pooled, well-conditioned fit and subtract it out of each driver's
   lap times before fitting their tyre slope alone.
+- `dashboard.py` — Streamlit app for head-to-head telemetry. Pick a session (Qualifying/Race)
+  and up to 3 drivers via a multiselect; compares their fastest lap as speed/throttle/brake
+  traces over distance. Run with `venv\Scripts\streamlit run dashboard.py`.
