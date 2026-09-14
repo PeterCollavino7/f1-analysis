@@ -219,10 +219,18 @@ with tab_telemetry:
         }
 
     common_distance = common_distance_m * (M_TO_FT if imperial else 1)
+    # Pre-formatted "1,346 m" strings used as the x values themselves. Two
+    # reasons: (1) Plotly's unified-hover header only accepts a numeric
+    # d3-format for the x-axis, with no way to attach a unit to it, so the
+    # header showed a bare number; using the label as x makes the header
+    # show that exact string, unit included. (2) relying on Plotly's own
+    # %{y:+.3f}-style client-side number formatting turned out to be
+    # unreliable for the delta chart's single-trace case (it rendered the
+    # raw, unrounded float instead), so every value below is pre-formatted
+    # in Python with an explicit round and passed as text, never left to
+    # the browser to format.
+    common_distance_labels = [f"{v:,.0f} {dist_unit}" for v in common_distance]
 
-    # Every trace below shares the exact same (resampled) distance grid, so
-    # the distance itself only needs to appear once -- as the "x unified"
-    # hover header -- instead of being repeated on every driver's line.
     dist_title = f"Distance ({dist_unit})"
     fig_speed = base_figure("Speed", speed_unit, dist_title, hovermode="x unified")
     fig_throttle = base_figure("Throttle", "%", dist_title, hovermode="x unified")
@@ -231,7 +239,7 @@ with tab_telemetry:
     fig_gear = base_figure("Gear", "", dist_title, hovermode="x unified")
     fig_gear.update_yaxes(tickvals=list(range(1, 9)), range=[0.5, 8.5])
     for fig in (fig_speed, fig_throttle, fig_brake, fig_gear):
-        fig.update_xaxes(hoverformat=",.0f")
+        fig.update_xaxes(categoryorder="array", categoryarray=common_distance_labels)
 
     for driver in selected_drivers:
         color, dash = driver_style[driver]
@@ -239,21 +247,23 @@ with tab_telemetry:
 
         fig_speed.add_trace(
             go.Scatter(
-                x=common_distance, y=speed, name=driver, line=dict(color=color, dash=dash, width=2.5),
-                hovertemplate=f"{driver}: %{{y:.2f}} {speed_unit}<extra></extra>",
+                x=common_distance_labels, y=speed, name=driver, line=dict(color=color, dash=dash, width=2.5),
+                text=[f"{v:.2f}" for v in speed],
+                hovertemplate=f"{driver}: " + "%{text}" + f" {speed_unit}<extra></extra>",
             )
         )
         fig_throttle.add_trace(
             go.Scatter(
-                x=common_distance, y=resampled[driver]["Throttle"], name=driver,
+                x=common_distance_labels, y=resampled[driver]["Throttle"], name=driver,
                 line=dict(color=color, dash=dash, width=2.5),
-                hovertemplate=f"{driver}: %{{y:.0f}}%<extra></extra>",
+                text=[f"{v:.0f}" for v in resampled[driver]["Throttle"]],
+                hovertemplate=f"{driver}: " + "%{text}%<extra></extra>",
             )
         )
         brake_state = np.where(resampled[driver]["Brake"], "On", "Off")
         fig_brake.add_trace(
             go.Scatter(
-                x=common_distance, y=resampled[driver]["Brake"], name=driver,
+                x=common_distance_labels, y=resampled[driver]["Brake"], name=driver,
                 line=dict(color=color, dash=dash, width=2.5, shape="hv"),
                 text=brake_state,
                 hovertemplate=f"{driver}: " + "%{text}<extra></extra>",
@@ -261,9 +271,10 @@ with tab_telemetry:
         )
         fig_gear.add_trace(
             go.Scatter(
-                x=common_distance, y=resampled[driver]["nGear"], name=driver,
+                x=common_distance_labels, y=resampled[driver]["nGear"], name=driver,
                 line=dict(color=color, dash=dash, width=2.5, shape="hv"),
-                hovertemplate=f"{driver}: gear %{{y:.0f}}<extra></extra>",
+                text=[f"{v:.0f}" for v in resampled[driver]["nGear"]],
+                hovertemplate=f"{driver}: gear " + "%{text}<extra></extra>",
             )
         )
 
@@ -274,7 +285,7 @@ with tab_telemetry:
     ref_elapsed = resampled[reference_driver]["Elapsed"]
 
     fig_delta = base_figure("Delta time", f"s (vs. {reference_driver})", dist_title, hovermode="x unified")
-    fig_delta.update_xaxes(hoverformat=",.0f")
+    fig_delta.update_xaxes(categoryorder="array", categoryarray=common_distance_labels)
     fig_delta.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.4)")
 
     for driver in selected_drivers:
@@ -284,10 +295,11 @@ with tab_telemetry:
         delta = resampled[driver]["Elapsed"] - ref_elapsed
         fig_delta.add_trace(
             go.Scatter(
-                x=common_distance, y=delta, name=f"{driver} vs {reference_driver}",
+                x=common_distance_labels, y=delta, name=f"{driver} vs {reference_driver}",
                 line=dict(color=color, dash=dash, width=2.5),
                 fill="tozeroy", fillcolor=hex_to_rgba(color, 0.15),
-                hovertemplate=f"{driver} vs {reference_driver}: %{{y:+.3f}} s<extra></extra>",
+                text=[f"{v:+.3f}" for v in delta],
+                hovertemplate=f"{driver} vs {reference_driver}: " + "%{text}" + " s<extra></extra>",
             )
         )
 
