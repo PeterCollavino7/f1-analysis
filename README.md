@@ -20,4 +20,10 @@ mkdir cache
   stint (typically Hard) shows lap times trending down for a reason that has nothing to do with
   the tyre. The `TyreLife` coefficient is the fuel-corrected degradation slope; on the first race
   tested it correctly orders Hard (~flat) < Medium < Soft (fastest degrading), matching real
-  tyre physics.
+  tyre physics. Also saves `tyre_degradation_by_driver.png`, the same idea broken down per
+  driver per compound — who manages each tyre best. That breakdown fits only `TyreLife` per
+  driver (not `TyreLife + LapNumber` again): a driver who ran a compound in a single stint has
+  `TyreLife` and `LapNumber` climbing together 1-for-1, so the two-variable fit is collinear and
+  the coefficients blow up (this produced nonsense ±20-30 s/lap bars at first). The fix is to
+  take the fuel slope from the pooled, well-conditioned fit and subtract it out of each driver's
+  lap times before fitting their tyre slope alone.
