@@ -208,7 +208,7 @@ with tab_telemetry:
         fig_speed.add_trace(
             go.Scatter(
                 x=distance, y=speed, name=driver, line=dict(color=color, dash=dash, width=2.5),
-                hovertemplate=f"{driver}: %{{y:.0f}} {speed_unit} · %{{x:.0f}} {dist_unit}<extra></extra>",
+                hovertemplate=f"{driver}: %{{y:.2f}} {speed_unit} · %{{x:.0f}} {dist_unit}<extra></extra>",
             )
         )
         fig_throttle.add_trace(
@@ -261,7 +261,7 @@ with tab_telemetry:
                 x=ref_distance, y=delta, name=f"{driver} vs {reference_driver}",
                 line=dict(color=color, dash=dash, width=2.5),
                 fill="tozeroy", fillcolor=hex_to_rgba(color, 0.15),
-                hovertemplate=f"{driver} vs {reference_driver}: %{{y:+.2f}} s · %{{x:.0f}} {dist_unit}<extra></extra>",
+                hovertemplate=f"{driver} vs {reference_driver}: %{{y:+.3f}} s · %{{x:.0f}} {dist_unit}<extra></extra>",
             )
         )
 
