@@ -10,21 +10,42 @@ Run with: venv\\Scripts\\streamlit run dashboard.py
 import datetime
 
 import fastf1
+import fastf1.plotting
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
 fastf1.Cache.enable_cache("cache")
 
-st.set_page_config(page_title="F1 Telemetry Compare", layout="wide")
-st.title("Head-to-head telemetry")
+st.set_page_config(page_title="F1 Telemetry Compare", layout="wide", initial_sidebar_state="expanded")
 
 MAX_DRIVERS = 3
-DRIVER_COLORS = ["#e10600", "#1e88e5", "#43a047"]  # kept distinct in both themes
-CHART_HEIGHT = 380
+CHART_HEIGHT = 340
+LINE_STYLES = ["solid", "dash", "dot"]  # cycled when two selected drivers share a team color
+KM_TO_MI = 0.621371
+M_TO_FT = 3.28084
 
 # FastF1's timing/telemetry data is only reliably complete from 2018 on.
 YEARS = list(range(2026, 2017, -1))
+
+st.markdown(
+    """
+    <style>
+    .stApp { background: radial-gradient(circle at top left, #1a1f2e 0%, #0e1117 55%); }
+    .driver-card {
+        border-radius: 10px;
+        padding: 0.9rem 1.1rem;
+        background: rgba(255,255,255,0.04);
+        border-left: 5px solid var(--card-color);
+    }
+    .driver-card .name { font-size: 1.1rem; font-weight: 700; color: var(--card-color); }
+    .driver-card .laptime { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 1.35rem; margin-top: 0.15rem; }
+    .driver-card .sub { opacity: 0.65; font-size: 0.8rem; margin-top: 0.2rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.title("🏁 Head-to-head telemetry")
 
 
 @st.cache_data(ttl=3600)
@@ -59,6 +80,12 @@ def session_names_for(event_row):
     return names
 
 
+def hex_to_rgba(hex_color, alpha):
+    hex_color = hex_color.lstrip("#")
+    r, g, b = (int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 year = st.sidebar.selectbox("Year", options=YEARS)
 schedule = load_schedule(year)
 
@@ -81,51 +108,103 @@ selected_drivers = st.sidebar.multiselect(
     max_selections=MAX_DRIVERS,
 )
 
+units = st.sidebar.radio("Units", options=["Metric (km/h, m)", "Imperial (mph, ft)"], horizontal=False)
+imperial = units.startswith("Imperial")
+speed_unit = "mph" if imperial else "km/h"
+dist_unit = "ft" if imperial else "m"
+
 if not selected_drivers:
     st.info("Select at least one driver from the sidebar.")
     st.stop()
 
 laps_by_driver = {d: session.laps.pick_drivers(d).pick_fastest() for d in selected_drivers}
 telemetry_by_driver = {d: lap.get_car_data().add_distance() for d, lap in laps_by_driver.items()}
-colors = dict(zip(selected_drivers, DRIVER_COLORS))
+
+# Real team colors, like FastF1's own plotting module uses -- but two
+# selected teammates (e.g. LEC/HAM at Ferrari) then share the exact same
+# color, which defeats the point of a head-to-head chart. When that happens,
+# later drivers with a repeated color get a dashed/dotted line instead of a
+# second solid line of the same color.
+driver_style = {}
+seen_colors = {}
+for driver in selected_drivers:
+    color = fastf1.plotting.get_driver_color(driver, session)
+    dash = LINE_STYLES[seen_colors.get(color, 0)]
+    seen_colors[color] = seen_colors.get(color, 0) + 1
+    driver_style[driver] = (color, dash)
 
 st.subheader(f"{year} {event_name} — {session_name} — fastest lap comparison")
-st.table(
-    [
-        {
-            "Driver": d,
-            "Lap time": str(lap["LapTime"]).split(" ")[-1][:-3],
-            "Top speed (km/h)": int(telemetry_by_driver[d]["Speed"].max()),
-        }
-        for d, lap in laps_by_driver.items()
-    ]
-)
+
+cards = st.columns(len(selected_drivers))
+for col, driver in zip(cards, selected_drivers):
+    lap = laps_by_driver[driver]
+    color, dash = driver_style[driver]
+    top_speed = telemetry_by_driver[driver]["Speed"].max()
+    if imperial:
+        top_speed *= KM_TO_MI
+    dash_note = f" ({dash} line)" if dash != "solid" else ""
+    col.markdown(
+        f"""
+        <div class="driver-card" style="--card-color:{color}">
+            <div class="name">{driver}{dash_note}</div>
+            <div class="laptime">{str(lap["LapTime"]).split(" ")[-1][:-3]}</div>
+            <div class="sub">Top speed: {top_speed:.0f} {speed_unit}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+st.write("")
 
 
 def base_figure(title, yaxis_title):
     fig = go.Figure()
     fig.update_layout(
         title=title,
-        xaxis_title="Distance (m)",
+        xaxis_title=f"Distance ({dist_unit})",
         yaxis_title=yaxis_title,
         height=CHART_HEIGHT,
         hovermode="x unified",
         margin=dict(t=40, b=40),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
+    fig.update_xaxes(showspikes=True, spikemode="across", spikethickness=1, spikedash="dot")
+    fig.update_yaxes(gridcolor="rgba(255,255,255,0.08)")
     return fig
 
 
-fig_speed = base_figure("Speed", "km/h")
+fig_speed = base_figure("Speed", speed_unit)
 fig_throttle = base_figure("Throttle", "%")
-fig_brake = base_figure("Brake", "on/off")
+fig_brake = base_figure("Brake", "")
+fig_brake.update_yaxes(tickvals=[0, 1], ticktext=["Off", "On"], range=[-0.15, 1.15])
 
 for driver in selected_drivers:
     tel = telemetry_by_driver[driver]
-    color = colors[driver]
-    fig_speed.add_trace(go.Scatter(x=tel["Distance"], y=tel["Speed"], name=driver, line=dict(color=color)))
-    fig_throttle.add_trace(go.Scatter(x=tel["Distance"], y=tel["Throttle"], name=driver, line=dict(color=color)))
+    color, dash = driver_style[driver]
+    distance = tel["Distance"] * (M_TO_FT if imperial else 1)
+    speed = tel["Speed"] * (KM_TO_MI if imperial else 1)
+
+    fig_speed.add_trace(
+        go.Scatter(
+            x=distance, y=speed, name=driver, line=dict(color=color, dash=dash, width=2.5),
+            hovertemplate=f"{driver}: %{{y:.0f}} {speed_unit} · %{{x:.0f}} {dist_unit}<extra></extra>",
+        )
+    )
+    fig_throttle.add_trace(
+        go.Scatter(
+            x=distance, y=tel["Throttle"], name=driver, line=dict(color=color, dash=dash, width=2.5),
+            hovertemplate=f"{driver}: %{{y:.0f}}% · %{{x:.0f}} {dist_unit}<extra></extra>",
+        )
+    )
+    brake_state = np.where(tel["Brake"], "On", "Off")
     fig_brake.add_trace(
-        go.Scatter(x=tel["Distance"], y=tel["Brake"].astype(int), name=driver, line=dict(color=color, shape="hv"))
+        go.Scatter(
+            x=distance, y=tel["Brake"].astype(int), name=driver, line=dict(color=color, dash=dash, width=2.5, shape="hv"),
+            text=brake_state,
+            hovertemplate=f"{driver}: " + "%{text}" + f" · %{{x:.0f}} {dist_unit}<extra></extra>",
+        )
     )
 
 # Delta time: gap to the fastest of the selected laps, over distance. Each
@@ -137,21 +216,27 @@ for driver in selected_drivers:
 reference_driver = min(laps_by_driver, key=lambda d: laps_by_driver[d]["LapTime"])
 ref_tel = telemetry_by_driver[reference_driver]
 ref_elapsed = (ref_tel["Time"] - ref_tel["Time"].iloc[0]).dt.total_seconds().to_numpy()
-ref_distance = ref_tel["Distance"].to_numpy()
+ref_distance_m = ref_tel["Distance"].to_numpy()
+ref_distance = ref_distance_m * (M_TO_FT if imperial else 1)
 
 fig_delta = base_figure("Delta time", f"s (vs. {reference_driver})")
-fig_delta.add_hline(y=0, line_dash="dash", line_color="gray")
+fig_delta.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.4)")
 
 for driver in selected_drivers:
     if driver == reference_driver:
         continue
     tel = telemetry_by_driver[driver]
+    color, dash = driver_style[driver]
     elapsed = (tel["Time"] - tel["Time"].iloc[0]).dt.total_seconds().to_numpy()
-    distance = tel["Distance"].to_numpy()
-    elapsed_on_ref_grid = np.interp(ref_distance, distance, elapsed)
+    elapsed_on_ref_grid = np.interp(ref_distance_m, tel["Distance"].to_numpy(), elapsed)
     delta = elapsed_on_ref_grid - ref_elapsed
     fig_delta.add_trace(
-        go.Scatter(x=ref_distance, y=delta, name=f"{driver} vs {reference_driver}", line=dict(color=colors[driver]))
+        go.Scatter(
+            x=ref_distance, y=delta, name=f"{driver} vs {reference_driver}",
+            line=dict(color=color, dash=dash, width=2.5),
+            fill="tozeroy", fillcolor=hex_to_rgba(color, 0.15),
+            hovertemplate=f"{driver} vs {reference_driver}: %{{y:+.2f}} s · %{{x:.0f}} {dist_unit}<extra></extra>",
+        )
     )
 
 st.plotly_chart(fig_speed, width="stretch")
