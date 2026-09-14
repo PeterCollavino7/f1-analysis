@@ -93,19 +93,14 @@ def hex_to_rgba(hex_color, alpha):
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def base_figure(title, yaxis_title, xaxis_title):
+def base_figure(title, yaxis_title, xaxis_title, hovermode="x"):
     fig = go.Figure()
     fig.update_layout(
         title=title,
         xaxis_title=xaxis_title,
         yaxis_title=yaxis_title,
         height=CHART_HEIGHT,
-        # "x" (not "x unified"): unified mode's shared header shows the raw
-        # x-value with no way to attach a unit to it, which is exactly what
-        # looked broken/unlabelled before. In "x" mode each trace keeps its
-        # own hovertemplate -- and every template below already spells out
-        # its own units -- so there's no bare, unlabelled number left.
-        hovermode="x",
+        hovermode=hovermode,
         margin=dict(t=40, b=40),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
@@ -183,7 +178,7 @@ with tab_telemetry:
             <div class="driver-card" style="--card-color:{color}">
                 <div class="name">{driver}{dash_note}</div>
                 <div class="laptime">{str(lap["LapTime"]).split(" ")[-1][:-3]}</div>
-                <div class="sub">Top speed: {speed_series.max():.0f} {speed_unit} · Average: {speed_series.mean():.0f} {speed_unit}</div>
+                <div class="sub">Top speed: {speed_series.max():.2f} {speed_unit} · Average: {speed_series.mean():.2f} {speed_unit}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -225,13 +220,18 @@ with tab_telemetry:
 
     common_distance = common_distance_m * (M_TO_FT if imperial else 1)
 
+    # Every trace below shares the exact same (resampled) distance grid, so
+    # the distance itself only needs to appear once -- as the "x unified"
+    # hover header -- instead of being repeated on every driver's line.
     dist_title = f"Distance ({dist_unit})"
-    fig_speed = base_figure("Speed", speed_unit, dist_title)
-    fig_throttle = base_figure("Throttle", "%", dist_title)
-    fig_brake = base_figure("Brake", "", dist_title)
+    fig_speed = base_figure("Speed", speed_unit, dist_title, hovermode="x unified")
+    fig_throttle = base_figure("Throttle", "%", dist_title, hovermode="x unified")
+    fig_brake = base_figure("Brake", "", dist_title, hovermode="x unified")
     fig_brake.update_yaxes(tickvals=[0, 1], ticktext=["Off", "On"], range=[-0.15, 1.15])
-    fig_gear = base_figure("Gear", "", dist_title)
+    fig_gear = base_figure("Gear", "", dist_title, hovermode="x unified")
     fig_gear.update_yaxes(tickvals=list(range(1, 9)), range=[0.5, 8.5])
+    for fig in (fig_speed, fig_throttle, fig_brake, fig_gear):
+        fig.update_xaxes(hoverformat=",.0f")
 
     for driver in selected_drivers:
         color, dash = driver_style[driver]
@@ -240,14 +240,14 @@ with tab_telemetry:
         fig_speed.add_trace(
             go.Scatter(
                 x=common_distance, y=speed, name=driver, line=dict(color=color, dash=dash, width=2.5),
-                hovertemplate=f"{driver}: %{{y:.2f}} {speed_unit} · %{{x:.0f}} {dist_unit}<extra></extra>",
+                hovertemplate=f"{driver}: %{{y:.2f}} {speed_unit}<extra></extra>",
             )
         )
         fig_throttle.add_trace(
             go.Scatter(
                 x=common_distance, y=resampled[driver]["Throttle"], name=driver,
                 line=dict(color=color, dash=dash, width=2.5),
-                hovertemplate=f"{driver}: %{{y:.0f}}% · %{{x:.0f}} {dist_unit}<extra></extra>",
+                hovertemplate=f"{driver}: %{{y:.0f}}%<extra></extra>",
             )
         )
         brake_state = np.where(resampled[driver]["Brake"], "On", "Off")
@@ -256,14 +256,14 @@ with tab_telemetry:
                 x=common_distance, y=resampled[driver]["Brake"], name=driver,
                 line=dict(color=color, dash=dash, width=2.5, shape="hv"),
                 text=brake_state,
-                hovertemplate=f"{driver}: " + "%{text}" + f" · %{{x:.0f}} {dist_unit}<extra></extra>",
+                hovertemplate=f"{driver}: " + "%{text}<extra></extra>",
             )
         )
         fig_gear.add_trace(
             go.Scatter(
                 x=common_distance, y=resampled[driver]["nGear"], name=driver,
                 line=dict(color=color, dash=dash, width=2.5, shape="hv"),
-                hovertemplate=f"{driver}: gear %{{y:.0f}} · %{{x:.0f}} {dist_unit}<extra></extra>",
+                hovertemplate=f"{driver}: gear %{{y:.0f}}<extra></extra>",
             )
         )
 
@@ -273,7 +273,8 @@ with tab_telemetry:
     reference_driver = min(laps_by_driver, key=lambda d: laps_by_driver[d]["LapTime"])
     ref_elapsed = resampled[reference_driver]["Elapsed"]
 
-    fig_delta = base_figure("Delta time", f"s (vs. {reference_driver})", dist_title)
+    fig_delta = base_figure("Delta time", f"s (vs. {reference_driver})", dist_title, hovermode="x unified")
+    fig_delta.update_xaxes(hoverformat=",.0f")
     fig_delta.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.4)")
 
     for driver in selected_drivers:
@@ -286,7 +287,7 @@ with tab_telemetry:
                 x=common_distance, y=delta, name=f"{driver} vs {reference_driver}",
                 line=dict(color=color, dash=dash, width=2.5),
                 fill="tozeroy", fillcolor=hex_to_rgba(color, 0.15),
-                hovertemplate=f"{driver} vs {reference_driver}: %{{y:+.3f}} s · %{{x:.0f}} {dist_unit}<extra></extra>",
+                hovertemplate=f"{driver} vs {reference_driver}: %{{y:+.3f}} s<extra></extra>",
             )
         )
 
