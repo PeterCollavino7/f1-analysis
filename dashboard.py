@@ -27,6 +27,7 @@ KM_TO_MI = 0.621371
 M_TO_FT = 3.28084
 MIN_LAPS_FOR_TREND = 10  # per compound, for the pooled fuel-correction fit
 MIN_LAPS_PER_DRIVER = 6  # per driver+compound, for the per-driver breakdown
+TRACK_SECTOR_COUNT = 20  # mini-sectors for the track dominance map, not the official S1/S2/S3
 
 COMPOUND_COLORS = {
     "SOFT": "#ff3333",
@@ -155,13 +156,17 @@ def season_stats(year, event_names):
     session once (cached after that), so this is the slow one on a cold
     cache."""
     rows = []
+    driver_overtakes = {}
     for event_name in event_names:
         try:
             race = fastf1.get_session(year, event_name, "Race")
             race.load()
         except Exception:
             continue
-        overtakes_total = sum(count_overtakes(race).values())
+        race_overtakes = count_overtakes(race)
+        for driver, count in race_overtakes.items():
+            driver_overtakes[driver] = driver_overtakes.get(driver, 0) + count
+        overtakes_total = sum(race_overtakes.values())
         results = race.results
         retirements = int((results["Status"] == "Retired").sum())
 
@@ -173,11 +178,6 @@ def season_stats(year, event_names):
             if gains.loc[best_idx] > 0:
                 recovery_driver, recovery_places = valid.loc[best_idx, "Abbreviation"], int(gains.loc[best_idx])
 
-        closest_gap = None
-        runner_up = results[results["Position"] == 2]
-        if not runner_up.empty and pd.notna(runner_up.iloc[0]["Time"]):
-            closest_gap = runner_up.iloc[0]["Time"].total_seconds()
-
         rows.append({
             "Event": event_name,
             "Round": int(race.event["RoundNumber"]),
@@ -185,9 +185,8 @@ def season_stats(year, event_names):
             "Retirements": retirements,
             "RecoveryDriver": recovery_driver,
             "RecoveryPlaces": recovery_places,
-            "ClosestGap": closest_gap,
         })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows), driver_overtakes
 
 
 # 2026's real, announced power unit lineup -- FastF1's results carry the
@@ -260,6 +259,24 @@ def hex_to_rgba(hex_color, alpha):
     hex_color = hex_color.lstrip("#")
     r, g, b = (int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
     return f"rgba({r},{g},{b},{alpha})"
+
+
+def interp_extrapolate(t, xp, fp):
+    """np.interp, but linearly extrapolating past the ends instead of
+    clamping to the nearest sample -- used for "distance at elapsed=0" of a
+    lap, which is always a query *before* the first telemetry sample (a
+    driver's first sample lags their true lap-start instant by anything
+    from ~2ms to over 100ms, and that lag differs enough driver to driver
+    that clamping silently baked several extra meters of "distance" into
+    whichever driver's telemetry started up slower -- worth ~0.1s once that
+    fed into the delta-time chart as a fake early-lap gap)."""
+    if t <= xp[0]:
+        slope = (fp[1] - fp[0]) / (xp[1] - xp[0])
+        return fp[0] + slope * (t - xp[0])
+    if t >= xp[-1]:
+        slope = (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
+        return fp[-1] + slope * (t - xp[-1])
+    return float(np.interp(t, xp, fp))
 
 
 def format_lap_time(td):
@@ -474,7 +491,7 @@ with tab_telemetry:
 
         own_distance_at_checkpoint = {
             driver: [
-                np.interp(t, tel["Time"].dt.total_seconds().to_numpy(), tel["Distance"].to_numpy())
+                interp_extrapolate(t, tel["Time"].dt.total_seconds().to_numpy(), tel["Distance"].to_numpy())
                 for t in sector_checkpoints[driver]
             ]
             for driver, tel in telemetry_by_driver.items()
@@ -596,8 +613,11 @@ with tab_telemetry:
         }
 
     st.caption(
-        "Track dominance: color shows which of two drivers is faster at each point on the lap "
-        "(a real corner-by-corner read on downforce/drag tradeoffs, not just overall pace)."
+        f"Track dominance: the lap is split into {TRACK_SECTOR_COUNT} mini-sectors (their length "
+        "follows this track's own lap distance, so every circuit gets its own boundaries), each "
+        "colored by whichever driver actually spent less time crossing it -- a real corner-by-corner "
+        "read on downforce/drag tradeoffs, not just overall pace. Hover a stretch of track for its "
+        "mini-sector number and both drivers' times."
     )
     if len(selected_drivers) < 2:
         st.info("Select at least 2 drivers to see the dominance map.")
@@ -616,7 +636,7 @@ with tab_telemetry:
         # wasn't available for this driver (see the try/except above).
         try:
             tel_a_checkpoints = [
-                np.interp(t, tel_a["Time"].dt.total_seconds().to_numpy(), tel_a["Distance"].to_numpy())
+                interp_extrapolate(t, tel_a["Time"].dt.total_seconds().to_numpy(), tel_a["Distance"].to_numpy())
                 for t in sector_checkpoints[dom_a]
             ]
             tel_a = tel_a.copy()
@@ -626,34 +646,72 @@ with tab_telemetry:
         x_on_grid = resample_linear(tel_a, "X")
         y_on_grid = resample_linear(tel_a, "Y")
 
-        speed_a = resampled[dom_a]["Speed"]
-        speed_b = resampled[dom_b]["Speed"]
-        speed_a_disp = speed_a * (KM_TO_MI if imperial else 1)
-        speed_b_disp = speed_b * (KM_TO_MI if imperial else 1)
         color_a, _ = driver_style[dom_a]
         color_b, _ = driver_style[dom_b]
 
-        faster = np.where(speed_a >= speed_b, 0, 1)
-        dom_text = [
-            f"{dom_a}: {sa:.2f} {speed_unit} · {dom_b}: {sb:.2f} {speed_unit}"
-            for sa, sb in zip(speed_a_disp, speed_b_disp)
-        ]
+        # Real corner-by-corner dominance instead of a per-point speed
+        # comparison: whichever instant a speed trace happens to be higher
+        # at can flip mid-corner without saying who was actually quicker end
+        # to end through that stretch. Reusing the elapsed-time channel
+        # already resampled onto the shared distance grid above (the same
+        # one the delta-time panel below is built from) and comparing how
+        # long each driver actually took to cross each mini-sector answers
+        # that properly.
+        elapsed_a = resampled[dom_a]["Elapsed"]
+        elapsed_b = resampled[dom_b]["Elapsed"]
+        n_points = len(common_distance_m)
+        sector_edges = [round(i * (n_points - 1) / TRACK_SECTOR_COUNT) for i in range(TRACK_SECTOR_COUNT + 1)]
+
+        # Real hover highlighting needs a plotly_hover/plotly_unhover JS
+        # listener wired straight into the chart's own div -- st.plotly_chart
+        # has no hover callback into Python. Tried twice as a raw-JS HTML
+        # component (CDN <script src>, then a fully inlined plotly.js) and
+        # both froze the whole app. Click selection is different: Streamlit
+        # has native support for it (on_select="rerun"), reusing the same
+        # plotly runtime it already ships instead of re-embedding one, so a
+        # click -- not a hover -- persists a highlighted sector across the
+        # rerun it triggers, via session_state.
+        selection_key = "track_dominance_selection"
+        selected_sector = st.session_state.get(selection_key, {}).get("selection", {}).get("points", [])
+        selected_sector = selected_sector[0]["curve_number"] if selected_sector else None
 
         fig_dom = go.Figure()
-        fig_dom.add_trace(
-            go.Scatter(
-                x=x_on_grid, y=y_on_grid, mode="markers",
-                marker=dict(
-                    size=5, color=faster, cmin=0, cmax=1,
-                    colorscale=[[0, color_a], [0.5, color_a], [0.5, color_b], [1, color_b]],
-                ),
-                text=dom_text, hovertemplate="%{text}<extra></extra>", showlegend=False,
+        for i in range(TRACK_SECTOR_COUNT):
+            start, end = sector_edges[i], sector_edges[i + 1]
+            seg_time_a = elapsed_a[end] - elapsed_a[start]
+            seg_time_b = elapsed_b[end] - elapsed_b[start]
+            color = color_a if seg_time_a <= seg_time_b else color_b
+            gap = abs(seg_time_a - seg_time_b)
+            hover = (
+                f"<b>Mini-sector {i + 1}</b><br>"
+                f"<span style='color:{color_a}'>{dom_a}</span>: <b>{seg_time_a:.3f} s</b><br>"
+                f"<span style='color:{color_b}'>{dom_b}</span>: <b>{seg_time_b:.3f} s</b>"
+                f"   {'+' if seg_time_a >= seg_time_b else '-'}{gap:.3f} s"
             )
-        )
+            is_selected = i == selected_sector
+            dimmed = selected_sector is not None and not is_selected
+            fig_dom.add_trace(
+                go.Scatter(
+                    x=x_on_grid[start : end + 1], y=y_on_grid[start : end + 1],
+                    mode="lines+markers",
+                    line=dict(color=color, width=17 if is_selected else 7),
+                    marker=dict(size=9 if is_selected else 4, color=color),
+                    opacity=0.3 if dimmed else 1.0,
+                    showlegend=False,
+                    text=[hover] * (end - start + 1),
+                    hovertemplate="%{text}<extra></extra>",
+                )
+            )
         fig_dom.update_xaxes(visible=False)
         fig_dom.update_yaxes(visible=False, scaleanchor="x", scaleratio=1)
-        fig_dom.update_layout(**DARK_LAYOUT, height=CHART_HEIGHT + 80, margin=dict(t=20, b=10))
-        st.plotly_chart(fig_dom, width="stretch")
+        fig_dom.update_layout(
+            **DARK_LAYOUT, height=CHART_HEIGHT + 80, margin=dict(t=20, b=10), hovermode="closest",
+            hoverlabel=dict(bgcolor="#1a1f2e", bordercolor="rgba(255,255,255,0.2)", font_size=13),
+        )
+        st.plotly_chart(
+            fig_dom, width="stretch", on_select="rerun", selection_mode="points", key=selection_key,
+        )
+        st.caption("Click a stretch of track to pin its highlight -- click it again to clear.")
         st.markdown(
             f'<span style="color:{color_a}">●</span> {dom_a} faster'
             f'&nbsp;&nbsp;&nbsp;<span style="color:{color_b}">●</span> {dom_b} faster',
@@ -722,11 +780,6 @@ with tab_telemetry:
                 line_color="rgba(255,255,255,0.35)", line_width=1.5,
                 row="all", col=1,
             )
-        fig_telemetry.add_annotation(
-            text="S1 · S2 · S3 (dotted lines mark the boundaries)", showarrow=False,
-            xref="paper", yref="paper", x=0, y=1.06, xanchor="left",
-            font=dict(size=11, color="rgba(255,255,255,0.55)"),
-        )
 
     for driver in selected_drivers:
         color, dash = driver_style[driver]
@@ -771,6 +824,7 @@ with tab_telemetry:
             fig_telemetry.add_trace(
                 go.Scatter(
                     x=common_distance_labels, y=delta_display, name=f"{driver} vs {reference_driver}",
+                    showlegend=False,
                     line=dict(color=color, dash=dash, width=2.5),
                     fill="tozeroy", fillcolor=hex_to_rgba(color, 0.15),
                     # A signed +/- number makes the reader do the "which one
@@ -1235,25 +1289,23 @@ with tab_standings:
             except Exception:
                 return "#999999"
 
-        def team_badge(name):
-            # No official team logos ship with FastF1 (or anywhere else
-            # local to this app), and pulling real ones in from the web
-            # means trusting an outside source to have the right, current
-            # marks -- this draws a small badge instead: team color, three
-            # letters, generated on the fly as an inline SVG data URI, so
-            # there's no external file and no license/accuracy risk.
-            color = team_color(name)
+        def driver_number_badge(number, color):
+            # Same reasoning as the team badges this replaced: no official
+            # logos ship with FastF1, and pulling real ones off the web means
+            # trusting an outside source for accuracy and license -- a race
+            # number in the driver's own color, drawn on the fly as an inline
+            # SVG data URI, reads as "their number" at a glance without
+            # either problem.
             text_color = "#111111" if color.lower() == "#ffffff" else "#ffffff"
-            initials = name[:3].upper()
             svg = (
                 f'<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">'
                 f'<circle cx="20" cy="20" r="18" fill="{color}" stroke="rgba(255,255,255,0.25)" stroke-width="2"/>'
-                f'<text x="20" y="25" font-family="Arial, sans-serif" font-size="13" font-weight="700" '
-                f'fill="{text_color}" text-anchor="middle">{initials}</text></svg>'
+                f'<text x="20" y="26" font-family="Arial, sans-serif" font-size="15" font-weight="800" '
+                f'font-style="italic" fill="{text_color}" text-anchor="middle">{number}</text></svg>'
             )
             return "data:image/svg+xml;utf8," + urllib.parse.quote(svg)
 
-        def standings_table(rows, points_col="Points", team_col=None):
+        def standings_table(rows, points_col="Points", badge_col=None):
             # Row 0 is the leader (rows come pre-sorted by position) -- a
             # highlighted background makes that visible at a glance instead
             # of making the reader scan the Pos column for "1".
@@ -1263,8 +1315,8 @@ with tab_standings:
                     points_col, format="%.0f", min_value=0, max_value=float(df[points_col].max()) or 1.0,
                 ),
             }
-            if team_col:
-                df.insert(0, "", df[team_col].map(team_badge))
+            if badge_col:
+                df.insert(0, "", df.pop(badge_col))
                 column_config[""] = st.column_config.ImageColumn("", width="small")
             styled = df.style.apply(
                 lambda row: ["background-color: rgba(91,140,255,0.16)" if row.name == 0 else "" for _ in row],
@@ -1336,6 +1388,10 @@ with tab_standings:
 
         driver_rows = [
             {
+                "Badge": driver_number_badge(
+                    int(r["driverNumber"]) if pd.notna(r["driverNumber"]) else "—",
+                    driver_color(r["driverCode"] if pd.notna(r["driverCode"]) else ""),
+                ),
                 "Pos": pos_label(r["position"]),
                 "Driver": r["driverCode"] if pd.notna(r["driverCode"]) else f"{r['givenName']} {r['familyName']}",
                 "Team": r["constructorNames"][0] if len(r["constructorNames"]) else "—",
@@ -1344,7 +1400,7 @@ with tab_standings:
             }
             for _, r in driver_standings.iterrows()
         ]
-        standings_table(driver_rows, team_col="Team")
+        standings_table(driver_rows, badge_col="Badge")
 
         st.divider()
 
@@ -1391,7 +1447,7 @@ with tab_standings:
             }
             for _, r in constructor_standings.iterrows()
         ]
-        standings_table(constructor_rows, team_col="Constructor")
+        standings_table(constructor_rows)
 
         st.divider()
 
@@ -1550,7 +1606,7 @@ with tab_season_stats:
         f"Computed across all {len(schedule)} completed races of the {year} season so far -- "
         "first load is slow (every race's full session gets fetched once), instant after that."
     )
-    stats_df = season_stats(year, tuple(schedule["EventName"].tolist()))
+    stats_df, driver_overtakes = season_stats(year, tuple(schedule["EventName"].tolist()))
 
     if stats_df.empty:
         st.info("No completed races to compute stats from yet.")
@@ -1576,17 +1632,11 @@ with tab_season_stats:
         col3.metric("Most retirements", f"{int(most_dnf['Retirements'])}")
         col3.caption(f"📍 {most_dnf['Event']}")
 
-        col4, col5 = st.columns(2)
         recovery_df = stats_df.dropna(subset=["RecoveryPlaces"])
         if not recovery_df.empty:
             best_recovery = recovery_df.loc[recovery_df["RecoveryPlaces"].idxmax()]
-            col4.metric("Best recovery drive", f"+{int(best_recovery['RecoveryPlaces'])} places")
-            col4.caption(f"📍 {best_recovery['RecoveryDriver']} -- {best_recovery['Event']}")
-        closest_df = stats_df.dropna(subset=["ClosestGap"])
-        if not closest_df.empty:
-            tightest = closest_df.loc[closest_df["ClosestGap"].idxmin()]
-            col5.metric("Closest finish", f"{tightest['ClosestGap']:.3f} s")
-            col5.caption(f"📍 {tightest['Event']} (P1 to P2)")
+            st.metric("Best recovery drive", f"+{int(best_recovery['RecoveryPlaces'])} places")
+            st.caption(f"📍 {best_recovery['RecoveryDriver']} -- {best_recovery['Event']}")
 
         st.divider()
 
@@ -1617,3 +1667,34 @@ with tab_season_stats:
             )
         )
         st.plotly_chart(fig_overtakes_season, width="stretch")
+
+        st.divider()
+
+        st.subheader("Overtakes by driver (season)")
+        ranked_driver_overtakes = sorted(driver_overtakes.items(), key=lambda kv: kv[1], reverse=True)
+        ranked_driver_overtakes = [(d, c) for d, c in ranked_driver_overtakes if c > 0]
+        if not ranked_driver_overtakes:
+            st.info("No on-track position gains detected across this season's races yet.")
+        else:
+            def safe_driver_color(code):
+                try:
+                    return fastf1.plotting.get_driver_color(code, session)
+                except Exception:
+                    return "#5b8cff"
+
+            fig_driver_overtakes = base_figure("Overtakes by driver", "Position gains", "")
+            fig_driver_overtakes.update_layout(
+                showlegend=False, height=max(CHART_HEIGHT, 24 * len(ranked_driver_overtakes)),
+            )
+            fig_driver_overtakes.add_trace(
+                go.Bar(
+                    x=[c for _, c in ranked_driver_overtakes],
+                    y=[d for d, _ in ranked_driver_overtakes],
+                    orientation="h",
+                    marker_color=[safe_driver_color(d) for d, _ in ranked_driver_overtakes],
+                    text=[f"{d}: {c}" for d, c in ranked_driver_overtakes],
+                    hovertemplate="%{text}<extra></extra>",
+                )
+            )
+            fig_driver_overtakes.update_yaxes(autorange="reversed")
+            st.plotly_chart(fig_driver_overtakes, width="stretch")
