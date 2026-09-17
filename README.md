@@ -27,15 +27,52 @@ mkdir cache
   the coefficients blow up (this produced nonsense ±20-30 s/lap bars at first). The fix is to
   take the fuel slope from the pooled, well-conditioned fit and subtract it out of each driver's
   lap times before fitting their tyre slope alone.
-- `dashboard.py` — Streamlit app for head-to-head telemetry. Pick a year, a Grand Prix, and one
-  of its actual sessions (the dropdown is built from that weekend's real `Session1..5` names in
-  the FastF1 schedule, so Sprint Qualifying/Sprint show up only on sprint weekends, and a normal
-  weekend shows Practice 1-3/Qualifying/Race), then up to 3 drivers via a multiselect. Charts:
-  speed, throttle, brake, and a delta-time chart (gap to the fastest of the selected laps,
-  computed by interpolating the other laps' elapsed time onto the reference lap's distance grid
-  — done directly with `numpy.interp` rather than `fastf1.utils.delta_time`, which the library's
-  own docs flag as deprecated and not very accurate). All four charts share one fixed height and
-  sit in a 2x2 grid. Data is fetched from the F1 API on first request for a given
-  year/event/session and cached locally after that (`cache/`) — there's no bulk pre-download of
-  every past race, new races just show up in the dropdown once they've happened and get fetched
-  the first time someone picks them. Run with `venv\Scripts\streamlit run dashboard.py`.
+- `dashboard.py` — the Streamlit app. Three scopes, picked in the sidebar, because they answer
+  questions at three different sizes: **Race weekend** (one session), **Season** (one
+  championship) and **All-time records** (the sport).
+  - *Race weekend* opens on a headline strip — winner, fastest lap, speed trap, biggest mover —
+    over three tabs in the order a weekend is actually read: **Results** (classification with a
+    places-gained column, plus a grid-to-finish slope chart), **Race pace** (position by lap with
+    the podium band shaded, tyre strategy, overtakes, race-pace spread as a box per driver, and
+    fuel-corrected tyre degradation) and **Head-to-head** (the mini-sector track dominance map,
+    the official sector splits as a diverging gap chart, and a five-panel lap trace — speed,
+    delta, throttle, brake, gear — with x-linked axes, so zooming one panel zooms all five).
+    The session dropdown is built from that weekend's real `Session1..5` names in the FastF1
+    schedule, so Sprint Qualifying/Sprint show up only on sprint weekends. Delta time is computed
+    by interpolating the other lap's elapsed time onto the reference lap's distance grid with
+    `numpy.interp`, rather than `fastf1.utils.delta_time`, which the library's own docs flag as
+    deprecated and not very accurate.
+  - *Season* has **Championship** (both standings tables, points progression with the leader's
+    line filled, Monte-Carlo title odds as donuts, and a clinch-round estimate) and **Race by
+    race** (season records, a points-per-race heatmap of every scoring driver against every
+    round, and overtakes by race and by driver).
+  - *All-time records* ranks wins, poles, constructor wins, single-season wins, winning streaks
+    and pole-to-win conversion across every championship race since 1950.
+
+  Data is fetched from the F1 API on first request for a given year/event/session and cached
+  locally after that (`cache/`) — there's no bulk pre-download of every past race, new races just
+  show up in the dropdown once they've happened and get fetched the first time someone picks
+  them. Run with `venv\Scripts\streamlit run dashboard.py`.
+
+
+## Look and feel
+
+The app carries its own dark theme rather than Streamlit's default: one stylesheet at the top of
+`dashboard.py` (design tokens in `:root`, mirrored into the `PALETTE` dict, because Plotly draws
+its figures from Python and never sees the page's CSS), plus `.streamlit/config.toml` for the
+widgets Streamlit draws itself. Every chart sits in a card with its own header, so no figure
+carries an in-plot title, and the long methodology notes — how an overtake is counted, what the
+title-odds simulation actually does — live in collapsed expanders instead of as paragraphs of
+body copy above the chart they explain. Typography is Titillium Web (the closest freely-licensed
+stand-in for Formula 1's own proprietary face) with JetBrains Mono for every lap time and gap.
+
+Two things to know before editing that stylesheet:
+
+- Streamlit's DOM isn't ours, so selectors use `data-testid` and ARIA attributes only. The
+  `st-emotion-cache-*` class names are content hashes that change on every Streamlit build, and
+  `data-baseweb` doesn't exist on the tabs any more (1.63 builds them on react-aria). Nothing is
+  hidden except the Deploy button and the status widget, so a rule that stops matching costs a
+  bit of styling, never a control.
+- The app-wide font rule has to exempt `[data-testid="stIconMaterial"]`. Streamlit draws its
+  chevrons and arrows as ligatures in a Material Symbols font, and overriding that font renders
+  every icon as its own name spelled out ("keyboard_arrow_right").

@@ -1,0 +1,18 @@
+# Streamlit's own theme, so the widgets the app doesn't draw itself -- select
+# boxes, multiselect tags, sliders, the tab underline, focus rings -- come up
+# in the same palette as everything in dashboard.py's stylesheet, instead of
+# Streamlit's stock red (#FF4B4B) sitting next to Formula 1's (#E10600).
+#
+# These values mirror the CSS custom properties in that stylesheet; change one
+# and change the other. The page background is painted over by CSS anyway (it
+# is a gradient, which this file can't express), but it is set here too so the
+# first frame, before the stylesheet applies, is already dark rather than white.
+[theme]
+base = "dark"
+primaryColor = "#e10600"
+backgroundColor = "#0b0e15"
+secondaryBackgroundColor = "#141824"
+textColor = "#eef1f5"
+
+[browser]
+gatherUsageStats = false
