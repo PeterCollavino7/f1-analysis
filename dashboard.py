@@ -494,6 +494,13 @@ st.markdown(
        shape as the hero chips, so the page has one vocabulary for "small
        labelled token". */
     .chip-row { display: flex; flex-wrap: wrap; gap: 0.45rem; padding: 0.1rem 0.7rem 0.55rem; }
+    /* Streamlit hangs a -16px bottom margin on every markdown container, to
+       swallow the bottom margin of the <p> it normally holds. A chip row is a
+       bare flex div with no such margin, so that -16px came straight off the
+       height its card is measured from and the chips hung out past the border.
+       Zeroing it on the containers that hold one puts the height back -- and
+       stays right if Streamlit ever changes the value. */
+    [data-testid="stMarkdownContainer"]:has(> .chip-row) { margin-bottom: 0 !important; }
     .chip {
         display: inline-flex; align-items: center; gap: 0.4rem;
         padding: 0.24rem 0.65rem; border-radius: 999px;
@@ -1200,6 +1207,17 @@ def render_track_map(x, y, sectors, height=620, stroke_room=16):
     )
 
 
+def format_odds(percent):
+    """A championship share, rounded to what the simulation can actually
+    support. 8000 trials can't tell 0.0125% from zero, and printing four
+    decimal places claims it can."""
+    if percent >= 1:
+        return f"{percent:.0f}%"
+    if percent >= 0.1:
+        return f"{percent:.1f}%"
+    return "&lt;0.1%" if percent > 0 else "0%"
+
+
 def points_cell(points, leader_points, color):
     """Points as a bar tinted with the entrant's own color, plus the value.
 
@@ -1374,6 +1392,51 @@ def base_figure(title="", yaxis_title="", xaxis_title="", hovermode="x"):
         linecolor="rgba(0,0,0,0)", tickfont=dict(size=11.5), title=axis_title,
     )
     return fig
+
+
+def spread_labels(values, plot_height_px, value_span, min_gap_px=17.0):
+    """Pixel offsets that stop a column of end-of-line labels overlapping.
+
+    A label sits at its line's final value, and lines that finish close
+    together produce labels drawn on top of each other -- unreadable exactly
+    where a championship is tightest. This walks the labels from the top down
+    and pushes each one just far enough below the previous to clear it,
+    returning the offset (in pixels, positive = down) for each input value in
+    its original order. The label keeps a leader line back to its real point,
+    so the nudge never misrepresents where the line actually ended.
+    """
+    if not len(values) or value_span <= 0:
+        return [0.0] * len(values)
+    # Data units -> pixels down from the top of the plot area.
+    def to_px(value):
+        return plot_height_px * (1 - value / value_span)
+
+    order = sorted(range(len(values)), key=lambda i: values[i], reverse=True)
+    wanted = {i: to_px(values[i]) for i in order}
+
+    # Pass one, top down: push each label just far enough below the previous
+    # one to clear it.
+    placed = {}
+    previous = None
+    for i in order:
+        position = wanted[i] if previous is None else max(wanted[i], previous + min_gap_px)
+        placed[i] = position
+        previous = position
+
+    # Pass two, bottom up: the first pass can only push *down*, so a tight
+    # cluster near the bottom of the chart -- the four teams on single-figure
+    # points -- ended up below the plot area entirely, and the axis grew a
+    # -100 gridline to accommodate the labels. This pulls the overflow back up
+    # inside the frame; between the two passes every label lands in
+    # [0, plot_height] whenever the labels can physically fit.
+    bottom_limit = plot_height_px
+    previous = None
+    for i in reversed(order):
+        position = min(placed[i], bottom_limit if previous is None else previous - min_gap_px)
+        placed[i] = max(position, 0.0)
+        previous = placed[i]
+
+    return [placed[i] - wanted[i] for i in range(len(values))]
 
 
 def style_bars(fig, radius=5):
@@ -1973,24 +2036,43 @@ def render_telemetry_tab():
     fig_telemetry.update_yaxes(tickvals=list(range(1, 9)), range=[0.5, 8.5], row=5, col=1)
     fig_telemetry.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.4)", row=2, col=1)
     if sector_checkpoints:
-        for i, sector_end in enumerate(shared_checkpoint_distance[1:3], start=1):
-            idx = int(np.argmin(np.abs(common_distance_m - sector_end)))
+        band_edges = [0.0] + list(shared_checkpoint_distance[1:3]) + [float(common_distance_m[-1])]
+        edge_index = [int(np.argmin(np.abs(common_distance_m - edge))) for edge in band_edges]
+        # Sector 2 gets a tinted band rather than being left as the gap between
+        # two faint dotted lines: across five stacked panels the eye never
+        # traced a hairline down all of them, so where one sector ended and the
+        # next began was guesswork. Shading the middle one makes all three
+        # readable at a glance -- S1 is what's left of the band, S3 what's
+        # right of it.
+        # Shapes take the *index* of the category, not its label. The x axis
+        # here is a category axis (the tick labels carry the unit, which a
+        # numeric axis can't), and on one of those a shape is positioned on the
+        # underlying 0..n-1 scale -- passing the label string, as this did at
+        # first, drew nothing at all. Annotations are the exception: they do
+        # accept the label, which is why the S1/S2/S3 markers showed up while
+        # the lines and the band didn't.
+        fig_telemetry.add_vrect(
+            x0=edge_index[1], x1=edge_index[2],
+            fillcolor="rgba(255,255,255,0.05)", line_width=0, layer="below",
+            row="all", col=1,
+        )
+        for idx in edge_index[1:3]:
             fig_telemetry.add_vline(
-                x=common_distance_labels[idx], line_dash="dot",
-                line_color="rgba(255,255,255,0.35)", line_width=1.5,
+                x=idx, line_dash="dot",
+                line_color="rgba(255,255,255,0.5)", line_width=1.5,
                 row="all", col=1,
             )
-        # The dotted lines say "a sector ends here" but not which sector is
-        # which; these label the three bands once, at the top of the
-        # speed panel, instead of repeating the answer on every row.
-        band_edges = [0.0] + list(shared_checkpoint_distance[1:3]) + [float(common_distance_m[-1])]
+        # The labels sit *inside* the top of the speed panel, not above it: at
+        # y=1 they landed in the same strip as the "Speed" subplot title and
+        # the two overprinted each other.
         for i in range(3):
             mid = (band_edges[i] + band_edges[i + 1]) / 2
             idx = int(np.argmin(np.abs(common_distance_m - mid)))
             fig_telemetry.add_annotation(
-                x=common_distance_labels[idx], y=1.0, yref="y domain", row=1, col=1,
-                text=f"S{i + 1}", showarrow=False, yanchor="bottom",
-                font=dict(size=10, color="rgba(226,232,240,0.45)"),
+                x=common_distance_labels[idx], y=0.97, yref="y domain", row=1, col=1,
+                text=f"S{i + 1}", showarrow=False, yanchor="top",
+                font=dict(size=10.5, color="rgba(226,232,240,0.6)"),
+                bgcolor="rgba(11,14,21,0.6)", borderpad=3,
             )
 
     for driver in selected_drivers:
@@ -2237,6 +2319,184 @@ def render_pace_tab():
 
     st.write("")
 
+    # Head-to-head race pace: two drivers' lap times side by side, on the tyre
+    # each was actually running. The degradation fits further down answer "how
+    # fast does this compound wear for the whole field"; they can't answer "was
+    # he quicker than the car he was racing, and when" -- which is the question
+    # a race is argued over, and the one the tyre-age chart kept being asked to
+    # do and couldn't (its x axis is tyre life, so two drivers on different
+    # strategies get laid on top of each other out of sequence).
+    h2h_laps = session.laps.dropna(subset=["LapTime", "LapNumber"])
+    if not h2h_laps.empty and h2h_laps["Driver"].nunique() >= 2:
+        h2h_options = order_by_classification(session, h2h_laps["Driver"].unique())
+        h2h_drivers = st.multiselect(
+            "Compare race pace", options=h2h_options, default=h2h_options[:2],
+            max_selections=2, key="pace_h2h",
+        )
+        if len(h2h_drivers) < 2:
+            st.info("Pick two drivers to compare their race pace lap by lap.")
+        else:
+            first_driver, second_driver = h2h_drivers
+            h2h_styles = build_driver_styles([first_driver, second_driver], session)
+            with chart_panel(
+                f"Race pace head-to-head · {first_driver} vs {second_driver}",
+                "Every lap, with the compound it was run on · lap 1 and pit laps "
+                "dropped, safety-car laps shaded",
+                accent=h2h_styles[first_driver][0],
+            ):
+                fig_h2h = make_subplots(
+                    rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.09,
+                    row_heights=[1.0, 0.5],
+                    subplot_titles=(
+                        "Lap time",
+                        f"Cumulative gap — {second_driver} relative to {first_driver}",
+                    ),
+                )
+
+                compounds_seen = []
+                clean_times = []
+                for driver in (first_driver, second_driver):
+                    color = h2h_styles[driver][0]
+                    driver_laps = h2h_laps[h2h_laps["Driver"] == driver].sort_values("LapNumber")
+                    # In- and out-laps are a pit stop, not pace: left in, they
+                    # add a 25-second spike per stop that flattens the whole
+                    # scale. Dropping them also breaks the line at each stop,
+                    # which is exactly where it should break.
+                    on_track = driver_laps[driver_laps["PitInTime"].isna() & driver_laps["PitOutTime"].isna()]
+                    # Lap 1 is a standing start, a first corner and whatever
+                    # happened in it -- several seconds slower than anything
+                    # that follows, and not race pace by any reading. Left in,
+                    # it either owns the top of the scale or gets clipped by it
+                    # and draws a vertical stripe off the top of the panel.
+                    on_track = on_track[on_track["LapNumber"] > 1]
+                    clean_times.extend(on_track["LapTime"].dt.total_seconds().tolist())
+                    first_stint = True
+                    for _, stint_laps in on_track.groupby("Stint"):
+                        compounds = stint_laps["Compound"].fillna("UNKNOWN")
+                        for compound in compounds.unique():
+                            if compound not in compounds_seen:
+                                compounds_seen.append(compound)
+                        fig_h2h.add_trace(
+                            go.Scatter(
+                                x=stint_laps["LapNumber"],
+                                y=stint_laps["LapTime"].dt.total_seconds(),
+                                mode="lines+markers",
+                                line=dict(color=color, width=2.4),
+                                # The line is the driver, the marker fill is the
+                                # tyre: one chart answering "who was quicker"
+                                # and "on what" at the same time, without a
+                                # second chart to cross-reference.
+                                marker=dict(
+                                    size=6,
+                                    color=[COMPOUND_COLORS.get(c, "#999999") for c in compounds],
+                                    line=dict(color=color, width=1.2),
+                                ),
+                                name=driver, legendgroup=driver, showlegend=first_stint,
+                                customdata=[
+                                    [driver, str(c).title(), life]
+                                    for c, life in zip(compounds, stint_laps["TyreLife"].fillna(0))
+                                ],
+                                hovertemplate=(
+                                    "%{customdata[0]}: %{y:.3f}s"
+                                    "<br>%{customdata[1]}, %{customdata[2]:.0f} laps old<extra></extra>"
+                                ),
+                            ),
+                            row=1, col=1,
+                        )
+                        first_stint = False
+
+                # Safety car and virtual safety car laps, shaded across both
+                # panels: without them the slow laps look like someone lifting.
+                try:
+                    status_laps = h2h_laps[h2h_laps["Driver"] == first_driver][["LapNumber", "TrackStatus"]]
+                    neutralised = sorted(
+                        int(row["LapNumber"]) for _, row in status_laps.iterrows()
+                        if isinstance(row["TrackStatus"], str)
+                        and ("4" in row["TrackStatus"] or "6" in row["TrackStatus"])
+                    )
+                except Exception:
+                    neutralised = []
+                for lap_number in neutralised:
+                    fig_h2h.add_vrect(
+                        x0=lap_number - 0.5, x1=lap_number + 0.5,
+                        fillcolor="rgba(255,179,64,0.07)", line_width=0, layer="below",
+                        row="all", col=1,
+                    )
+
+                # Cumulative gap, computed on *every* lap including the pit
+                # laps dropped above: a stop is the single biggest thing that
+                # happens to a gap, and leaving it out would draw an undercut
+                # as if it never occurred.
+                seconds = {
+                    driver: h2h_laps[h2h_laps["Driver"] == driver]
+                    .set_index("LapNumber")["LapTime"].dt.total_seconds()
+                    for driver in (first_driver, second_driver)
+                }
+                shared_laps = seconds[first_driver].index.intersection(seconds[second_driver].index).sort_values()
+                if len(shared_laps) > 1:
+                    gap = (
+                        seconds[second_driver].loc[shared_laps].cumsum()
+                        - seconds[first_driver].loc[shared_laps].cumsum()
+                    )
+                    gap_color = h2h_styles[second_driver][0]
+                    fig_h2h.add_trace(
+                        go.Scatter(
+                            x=shared_laps, y=gap, mode="lines", name="gap", showlegend=False,
+                            line=dict(color=gap_color, width=2.2),
+                            fill="tozeroy",
+                            fillcolor=hex_to_rgba(gap_color, 0.14) if gap_color.startswith("#")
+                            else "rgba(255,255,255,0.08)",
+                            text=[
+                                f"{second_driver} ahead by {abs(v):.1f}s" if v < 0
+                                else f"{first_driver} ahead by {abs(v):.1f}s"
+                                for v in gap
+                            ],
+                            hovertemplate="%{text}<extra></extra>",
+                        ),
+                        row=2, col=1,
+                    )
+                    fig_h2h.add_hline(
+                        y=0, line_dash="dash", line_color="rgba(255,255,255,0.35)", row=2, col=1,
+                    )
+
+                fig_h2h.update_layout(
+                    **DARK_LAYOUT,
+                    height=560, hovermode="x unified", margin=dict(t=46, b=44, l=8, r=18),
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1,
+                        bgcolor="rgba(0,0,0,0)",
+                    ),
+                )
+                fig_h2h.update_annotations(font=dict(size=13, color="#f2f4f6"))
+                fig_h2h.update_xaxes(
+                    gridcolor=PALETTE["grid"], zeroline=False, tickfont=dict(size=11.5),
+                    linecolor=PALETTE["axis"],
+                )
+                fig_h2h.update_yaxes(
+                    gridcolor=PALETTE["grid"], zeroline=False, tickfont=dict(size=11.5),
+                )
+                if clean_times:
+                    # A robust top to the scale rather than the slowest lap:
+                    # one lap in traffic behind a backmarker is worth ten
+                    # seconds, and letting it set the range squashes the
+                    # tenths that the rest of the chart is about.
+                    floor = min(clean_times)
+                    ceiling = float(np.quantile(clean_times, 0.95)) + 1.5
+                    fig_h2h.update_yaxes(range=[floor - 0.6, ceiling], row=1, col=1)
+                fig_h2h.update_yaxes(title_text="Lap time (s)", row=1, col=1)
+                fig_h2h.update_yaxes(title_text="Gap (s)", row=2, col=1)
+                fig_h2h.update_xaxes(title_text="Lap", row=2, col=1)
+                st.plotly_chart(fig_h2h, width="stretch", config=PLOTLY_CONFIG)
+                chips(
+                    [
+                        (COMPOUND_COLORS.get(c, "#999999"), str(c).title())
+                        for c in compounds_seen
+                    ]
+                    + ([("rgba(255,179,64,0.5)", "Safety car / VSC")] if neutralised else [])
+                )
+
+        st.write("")
+
     overtake_laps = session.laps.dropna(subset=["Position", "LapNumber"])
     if overtake_laps.empty:
         st.info("No lap-by-lap position data available to count overtakes in this session.")
@@ -2369,7 +2629,42 @@ def render_pace_tab():
         pace_driver_options = sorted(pace_laps["Driver"].unique())
         pace_drivers = st.multiselect("Show individual laps for", options=pace_driver_options, default=[])
 
-        fig_pace = base_figure("", "Lap time (s)", "Tyre life (laps)")
+        fig_pace = base_figure("", "Lap time (s), fuel-corrected", "Tyre life (laps)")
+
+        # The fits run before anything is drawn, because the individual laps
+        # need them. The trend lines were always fuel-corrected -- each is
+        # evaluated at its compound's own mean lap number -- while the laps
+        # plotted under them were raw, so a long Hard stint's dots fell three
+        # seconds down the chart beneath a trend line that was nearly flat.
+        # The chart contradicted itself. Correcting the dots the same way puts
+        # them back on the axis the line claims to fit.
+        fits = {}
+        for compound in compounds_with_data:
+            compound_laps = pace_laps[pace_laps["Compound"] == compound].dropna(
+                subset=["TyreLife", "LapNumber", "LapTime"]
+            )
+            tyre_life = compound_laps["TyreLife"].to_numpy(dtype=float)
+            lap_number = compound_laps["LapNumber"].to_numpy(dtype=float)
+            lap_time = compound_laps["LapTime"].dt.total_seconds().to_numpy()
+            design = np.column_stack([tyre_life, lap_number, np.ones_like(tyre_life)])
+            finite_rows = np.isfinite(design).all(axis=1) & np.isfinite(lap_time)
+            design, tyre_life, lap_number, lap_time = (
+                design[finite_rows], tyre_life[finite_rows], lap_number[finite_rows], lap_time[finite_rows],
+            )
+            if len(lap_time) < MIN_LAPS_FOR_TREND:
+                continue
+            try:
+                (tyre_coef, fuel_coef, intercept), *_ = np.linalg.lstsq(design, lap_time, rcond=None)
+            except np.linalg.LinAlgError:
+                st.warning(f"Couldn't fit a degradation trend for {compound.title()} (bad/degenerate data).")
+                continue
+            fits[compound] = {
+                "tyre": tyre_coef, "fuel": fuel_coef, "intercept": intercept,
+                "mean_lap": lap_number.mean(),
+                "life_range": (tyre_life.min(), tyre_life.max()),
+            }
+        # The per-driver breakdown below reads the fuel slope from here.
+        coeffs = {compound: (fit["tyre"], fit["fuel"]) for compound, fit in fits.items()}
 
         if pace_drivers:
             shown_stints = pace_laps[pace_laps["Driver"].isin(pace_drivers)].groupby(["Driver", "Stint"])
@@ -2393,6 +2688,12 @@ def render_pace_tab():
                 color = COMPOUND_COLORS.get(compound, "#999999")
                 stint_laps = stint_laps.sort_values("TyreLife")
                 lap_times = stint_laps["LapTime"].dt.total_seconds()
+                fit = fits.get(compound)
+                if fit is not None:
+                    # Every lap pulled to the fuel load the trend line is drawn
+                    # at, so a stint late in the race isn't simply lower on the
+                    # chart than the same stint run early.
+                    lap_times = lap_times - fit["fuel"] * (stint_laps["LapNumber"] - fit["mean_lap"])
                 hover_text = [
                     f"{driver}: {t:.3f} s at {tl:.0f} laps" for t, tl in zip(lap_times, stint_laps["TyreLife"])
                 ]
@@ -2415,31 +2716,10 @@ def render_pace_tab():
         else:
             st.caption("Pick one or more drivers above to see their individual laps under the trend lines.")
 
-        coeffs = {}
-        for compound in compounds_with_data:
-            compound_laps = pace_laps[pace_laps["Compound"] == compound].dropna(
-                subset=["TyreLife", "LapNumber", "LapTime"]
-            )
-            tyre_life = compound_laps["TyreLife"].to_numpy(dtype=float)
-            lap_number = compound_laps["LapNumber"].to_numpy(dtype=float)
-            lap_time = compound_laps["LapTime"].dt.total_seconds().to_numpy()
-            design = np.column_stack([tyre_life, lap_number, np.ones_like(tyre_life)])
-            finite_rows = np.isfinite(design).all(axis=1) & np.isfinite(lap_time)
-            design, tyre_life, lap_number, lap_time = (
-                design[finite_rows], tyre_life[finite_rows], lap_number[finite_rows], lap_time[finite_rows],
-            )
-            if len(lap_time) < MIN_LAPS_FOR_TREND:
-                continue
-            try:
-                (tyre_coef, fuel_coef, intercept), *_ = np.linalg.lstsq(design, lap_time, rcond=None)
-            except np.linalg.LinAlgError:
-                st.warning(f"Couldn't fit a degradation trend for {compound.title()} (bad/degenerate data).")
-                continue
-            coeffs[compound] = (tyre_coef, fuel_coef)
-
-            mean_lap_number = lap_number.mean()
-            x_fit = np.linspace(tyre_life.min(), tyre_life.max(), 2)
-            y_fit = tyre_coef * x_fit + fuel_coef * mean_lap_number + intercept
+        for compound, fit in fits.items():
+            x_fit = np.linspace(*fit["life_range"], 2)
+            y_fit = fit["tyre"] * x_fit + fit["fuel"] * fit["mean_lap"] + fit["intercept"]
+            tyre_coef = fit["tyre"]
             color = COMPOUND_COLORS.get(compound, "#999999")
             trend_text = [f"{compound.title()}: {t:.3f} s at {tl:.0f} laps" for t, tl in zip(y_fit, x_fit)]
             # Fit on the whole field, not just whichever drivers are shown
@@ -2705,29 +2985,49 @@ if section == SECTION_WEEKEND:
                         height=max(CHART_HEIGHT, 24 * len(movers) + 80),
                         showlegend=False, margin=dict(l=60, r=90, t=28, b=30),
                     )
+                    # An explicit range, as on the position chart: a reversed
+                    # autorange padded the axis out to a P0 above the pole
+                    # sitter and a P23 below the last finisher.
+                    last_place = int(movers["Position"].max())
                     fig_slope.update_yaxes(
-                        autorange="reversed", dtick=1, showgrid=True, tickfont=dict(size=11),
+                        autorange=False, range=[last_place + 0.6, 0.4],
+                        dtick=1, showgrid=True, tickfont=dict(size=11),
                     )
                     fig_slope.update_xaxes(
                         tickmode="array", tickvals=[0, 1], ticktext=["GRID", "FINISH"],
                         range=[-0.12, 1.32], showgrid=False, showspikes=False,
                         tickfont=dict(size=11, color="rgba(226,232,240,0.55)"),
                     )
+                    # Most of a field finishes within a place or two of where
+                    # it started, and twenty near-parallel lines say nothing.
+                    # The chart earns its place on the few drivers who actually
+                    # moved, so those are drawn at full strength and the rest
+                    # recede -- the crossing lines are the story, not the flat
+                    # ones.
+                    BIG_MOVE = 3
                     for _, r in movers.iterrows():
                         grid_pos, finish_pos = int(r["GridPosition"]), int(r["Position"])
                         moved = grid_pos - finish_pos
+                        eventful = abs(moved) >= BIG_MOVE
                         color = safe_driver_color(r["Abbreviation"], session)
                         sign = "+" if moved > 0 else ""
                         fig_slope.add_trace(
                             go.Scatter(
                                 x=[0, 1], y=[grid_pos, finish_pos],
                                 mode="lines+markers+text",
-                                line=dict(color=color, width=2.5, shape="spline", smoothing=0.6),
-                                marker=dict(size=8, color=color, line=dict(color="#0b0e15", width=1.5)),
+                                opacity=1.0 if eventful else 0.45,
+                                line=dict(
+                                    color=color, width=3.2 if eventful else 1.6,
+                                    shape="spline", smoothing=0.6,
+                                ),
+                                marker=dict(
+                                    size=9 if eventful else 6.5, color=color,
+                                    line=dict(color="#0b0e15", width=1.5),
+                                ),
                                 text=["", f"  {r['Abbreviation']} <b>{sign}{moved if moved else '='}</b>"],
                                 textposition="middle right",
                                 textfont=dict(
-                                    size=10.5,
+                                    size=11.5 if eventful else 10,
                                     color=PALETTE["teal"] if moved > 0 else (
                                         "#ff6b6b" if moved < 0 else "rgba(226,232,240,0.55)"
                                     ),
@@ -2809,7 +3109,7 @@ if section == SECTION_SEASON:
                 # position chart already uses for the same problem: no legend,
                 # closest-point hover, driver code labeled at the end of its own line.
                 fig_driver_progress = base_figure("", "Points", "Round", hovermode="closest")
-                fig_driver_progress.update_layout(height=460, showlegend=False, margin=dict(t=24, b=44, r=64, l=8))
+                fig_driver_progress.update_layout(height=460, showlegend=False, margin=dict(t=24, b=44, r=96, l=8))
                 driver_order = [
                     r["driverCode"] if pd.notna(r["driverCode"]) else f"{r['givenName']} {r['familyName']}"
                     for _, r in driver_standings.sort_values("position").iterrows()
@@ -2818,6 +3118,26 @@ if section == SECTION_SEASON:
                 # bunch up near zero points and their labels just pile on top of
                 # each other; the line and its hover are still there for anyone
                 # further back, they just aren't individually labeled.
+                # Where each labelled line ends, worked out before anything is
+                # drawn, so the labels can be de-clumped against each other.
+                driver_finals = {
+                    d: driver_progress[driver_progress["Driver"] == d].sort_values("Round")["Points"].iloc[-1]
+                    for d in driver_order
+                }
+                labelled_drivers = driver_order[:10]
+                # The axis range is pinned rather than left to autorange: an
+                # annotation anchored to a data point counts towards the range
+                # Plotly picks, so nudged labels dragged the axis out to fit
+                # themselves (a points chart with a -100 gridline on it).
+                driver_points_top = (max(driver_finals.values()) or 1) * 1.06
+                driver_offsets = dict(zip(
+                    labelled_drivers,
+                    spread_labels(
+                        [driver_finals[d] for d in labelled_drivers],
+                        plot_height_px=460 - 24 - 44,  # figure height less its margins
+                        value_span=driver_points_top,
+                    ),
+                ))
                 for rank, driver in enumerate(driver_order):
                     driver_pts = driver_progress[driver_progress["Driver"] == driver].sort_values("Round")
                     color = driver_color(driver)
@@ -2839,12 +3159,21 @@ if section == SECTION_SEASON:
                     if rank >= 10:
                         continue
                     last = driver_pts.iloc[-1]
+                    # showarrow=True is what allows the pixel nudge (ax/ay): the
+                    # label moves, the anchor doesn't, and the thin leader line
+                    # keeps it tied to the point it belongs to.
                     fig_driver_progress.add_annotation(
-                        x=last["Round"], y=last["Points"], text=f"<b>{driver}</b>", showarrow=False,
-                        xanchor="left", xshift=7, font=dict(size=9.5, color=color),
-                        bgcolor="rgba(10,13,20,0.75)", bordercolor=color, borderwidth=1, borderpad=2,
+                        x=last["Round"], y=last["Points"], text=f"<b>{driver}</b>",
+                        showarrow=True, arrowhead=0, arrowwidth=1, arrowcolor=hex_to_rgba(color, 0.45)
+                        if color.startswith("#") else "rgba(255,255,255,0.35)",
+                        ax=26, ay=driver_offsets.get(driver, 0.0), xanchor="left", yanchor="middle",
+                        font=dict(size=9.5, color=color),
+                        bgcolor="rgba(10,13,20,0.82)", bordercolor=color, borderwidth=1, borderpad=2,
                     )
-                fig_driver_progress.update_xaxes(dtick=1)
+                fig_driver_progress.update_xaxes(
+                    dtick=1, range=[driver_progress["Round"].min() - 0.15, round_number + 0.15],
+                )
+                fig_driver_progress.update_yaxes(range=[0, driver_points_top])
                 with chart_panel(
                     "Points progression",
                     "Running total after every round · top 10 labelled",
@@ -2902,8 +3231,22 @@ if section == SECTION_SEASON:
 
             if round_number > 1:
                 fig_constructor_progress = base_figure("", "Points", "Round", hovermode="closest")
-                fig_constructor_progress.update_layout(height=400, showlegend=False, margin=dict(t=24, b=44, r=120, l=8))
+                fig_constructor_progress.update_layout(height=400, showlegend=False, margin=dict(t=24, b=44, r=150, l=8))
                 constructor_order = constructor_standings.sort_values("position")["constructorName"].tolist()
+                constructor_finals = {
+                    c: constructor_progress[constructor_progress["Constructor"] == c]
+                    .sort_values("Round")["Points"].iloc[-1]
+                    for c in constructor_order
+                }
+                constructor_points_top = (max(constructor_finals.values()) or 1) * 1.06
+                constructor_offsets = dict(zip(
+                    constructor_order,
+                    spread_labels(
+                        [constructor_finals[c] for c in constructor_order],
+                        plot_height_px=400 - 24 - 44,
+                        value_span=constructor_points_top,
+                    ),
+                ))
                 for rank_c, constructor in enumerate(constructor_order):
                     team_pts = constructor_progress[constructor_progress["Constructor"] == constructor].sort_values("Round")
                     color = team_color(constructor)
@@ -2919,12 +3262,23 @@ if section == SECTION_SEASON:
                         )
                     )
                     last = team_pts.iloc[-1]
+                    # "Alpine F1 Team" and "Cadillac F1 Team" are the same team
+                    # as "Alpine" and "Cadillac"; the suffix only made the
+                    # widest labels wider. The full name stays in the hover.
+                    short_name = constructor.replace(" F1 Team", "").replace(" Racing", "")
                     fig_constructor_progress.add_annotation(
-                        x=last["Round"], y=last["Points"], text=f"<b>{constructor}</b>", showarrow=False,
-                        xanchor="left", xshift=7, font=dict(size=9.5, color=color),
-                        bgcolor="rgba(10,13,20,0.75)", bordercolor=color, borderwidth=1, borderpad=2,
+                        x=last["Round"], y=last["Points"], text=f"<b>{short_name}</b>",
+                        showarrow=True, arrowhead=0, arrowwidth=1, arrowcolor=hex_to_rgba(color, 0.45)
+                        if color.startswith("#") else "rgba(255,255,255,0.35)",
+                        ax=26, ay=constructor_offsets.get(constructor, 0.0),
+                        xanchor="left", yanchor="middle",
+                        font=dict(size=9.5, color=color),
+                        bgcolor="rgba(10,13,20,0.82)", bordercolor=color, borderwidth=1, borderpad=2,
                     )
-                fig_constructor_progress.update_xaxes(dtick=1)
+                fig_constructor_progress.update_xaxes(
+                    dtick=1, range=[constructor_progress["Round"].min() - 0.15, round_number + 0.15],
+                )
+                fig_constructor_progress.update_yaxes(range=[0, constructor_points_top])
                 with chart_panel(
                     "Points progression",
                     "Running total after every round",
@@ -3003,25 +3357,34 @@ if section == SECTION_SEASON:
                         # The favourite's slice is pulled a hair out of the ring
                         # so the chart has a subject, not just three shares.
                         pull=[0.035] + [0] * (len(ranked) - 1),
-                        hole=0.62, sort=False, textinfo="label+percent",
-                        textposition="outside",
-                        textfont=dict(size=12, color="rgba(226,232,240,0.8)"),
+                        hole=0.62, sort=False,
+                        # No slice labels at all. Plotly stacks the outside
+                        # ones in the order it draws them, so the two
+                        # no-hope contenders -- whose slices are a sliver or
+                        # nothing -- piled their names on top of each other
+                        # above the ring, next to a leader line pointing at a
+                        # slice too thin to see. The three names and shares
+                        # are listed as chips under the chart instead, where
+                        # they can't collide, and the favourite's own share
+                        # is in the hole.
+                        textinfo="none",
                         hovertemplate="%{label}: %{percent}<extra></extra>",
                     )
                 )
                 fig.update_layout(
                     **DARK_LAYOUT,
-                    height=300, showlegend=False, margin=dict(t=16, b=16, l=10, r=10),
+                    height=270, showlegend=False, margin=dict(t=10, b=10, l=10, r=10),
                 )
-                # The favourite's share, big, in the hole -- the number a
-                # reader takes away from this chart, rather than one they have
-                # to find among three slice labels.
+                # Two annotations, not one with a <span> in it: a mixed-size
+                # <br> block is laid out on the base font's line height, so the
+                # 26px number rode up into the name above it.
                 fig.add_annotation(
-                    text=(
-                        f"<b>{ranked[0][0]}</b><br>"
-                        f"<span style='font-size:26px'>{ranked[0][1] * 100:.0f}%</span>"
-                    ),
-                    showarrow=False, font=dict(size=13, color=ranked[0][2]), x=0.5, y=0.5,
+                    text=f"<b>{ranked[0][0]}</b>", showarrow=False,
+                    font=dict(size=13, color=ranked[0][2]), x=0.5, y=0.60,
+                )
+                fig.add_annotation(
+                    text=f"{format_odds(ranked[0][1] * 100)}", showarrow=False,
+                    font=dict(size=27, color=ranked[0][2]), x=0.5, y=0.44,
                 )
                 return fig
 
@@ -3045,6 +3408,12 @@ if section == SECTION_SEASON:
                     odds_chart("", names, [odds[n] for n in names], colors),
                     width="stretch", config=PLOTLY_CONFIG,
                 )
+                chips([
+                    (color, f"{name} {format_odds(odds[name] * 100)}")
+                    for name, color in sorted(
+                        zip(names, colors), key=lambda pair: odds[pair[0]], reverse=True,
+                    )
+                ])
 
             with col_constructors_odds:
                 st.markdown(
@@ -3061,6 +3430,12 @@ if section == SECTION_SEASON:
                     odds_chart("", names_c, [odds_c[n] for n in names_c], colors_c),
                     width="stretch", config=PLOTLY_CONFIG,
                 )
+                chips([
+                    (color, f"{name.replace(' F1 Team', '')} {format_odds(odds_c[name] * 100)}")
+                    for name, color in sorted(
+                        zip(names_c, colors_c), key=lambda pair: odds_c[pair[0]], reverse=True,
+                    )
+                ])
 
             st.write("")
 
