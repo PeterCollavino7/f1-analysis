@@ -2,5 +2,10 @@ venv/
 cache/
 __pycache__/
 *.pyc
+# Plots the scripts write next to themselves (tyre_degradation.png and
+# friends) are build output, not source. The screenshots the README points at
+# are the exception -- they are the only way to see what this looks like
+# without installing it.
 *.png
+!assets/screenshot-*.png
 streamlit.log

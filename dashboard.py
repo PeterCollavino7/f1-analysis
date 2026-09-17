@@ -2340,8 +2340,8 @@ def render_pace_tab():
             h2h_styles = build_driver_styles([first_driver, second_driver], session)
             with chart_panel(
                 f"Race pace head-to-head · {first_driver} vs {second_driver}",
-                "Every lap, with the compound it was run on · lap 1 and pit laps "
-                "dropped, safety-car laps shaded",
+                "Every lap, with the compound it was run on · lap 1, pit laps and "
+                "laps off the scale dropped, safety-car laps shaded",
                 accent=h2h_styles[first_driver][0],
             ):
                 fig_h2h = make_subplots(
@@ -2355,8 +2355,8 @@ def render_pace_tab():
 
                 compounds_seen = []
                 clean_times = []
+                on_track_by_driver = {}
                 for driver in (first_driver, second_driver):
-                    color = h2h_styles[driver][0]
                     driver_laps = h2h_laps[h2h_laps["Driver"] == driver].sort_values("LapNumber")
                     # In- and out-laps are a pit stop, not pace: left in, they
                     # add a 25-second spike per stop that flattens the whole
@@ -2369,7 +2369,21 @@ def render_pace_tab():
                     # it either owns the top of the scale or gets clipped by it
                     # and draws a vertical stripe off the top of the panel.
                     on_track = on_track[on_track["LapNumber"] > 1]
+                    on_track_by_driver[driver] = on_track
                     clean_times.extend(on_track["LapTime"].dt.total_seconds().tolist())
+
+                # The scale is decided before any trace is added, because the
+                # traces are drawn against it: a lap slower than the ceiling is
+                # cut from the line rather than clipped by the axis. Clipping
+                # leaves the segment running to the top of the panel, which
+                # reads as a spike with no top to it -- two of them showed up
+                # in the opening laps of every race with an early safety car.
+                floor = min(clean_times) - 0.6 if clean_times else 0
+                ceiling = float(np.quantile(clean_times, 0.95)) + 1.5 if clean_times else 1
+
+                for driver in (first_driver, second_driver):
+                    color = h2h_styles[driver][0]
+                    on_track = on_track_by_driver[driver]
                     first_stint = True
                     for _, stint_laps in on_track.groupby("Stint"):
                         compounds = stint_laps["Compound"].fillna("UNKNOWN")
@@ -2379,7 +2393,9 @@ def render_pace_tab():
                         fig_h2h.add_trace(
                             go.Scatter(
                                 x=stint_laps["LapNumber"],
-                                y=stint_laps["LapTime"].dt.total_seconds(),
+                                y=stint_laps["LapTime"].dt.total_seconds().where(
+                                    lambda seconds: seconds <= ceiling
+                                ),
                                 mode="lines+markers",
                                 line=dict(color=color, width=2.4),
                                 # The line is the driver, the marker fill is the
@@ -2477,12 +2493,10 @@ def render_pace_tab():
                 )
                 if clean_times:
                     # A robust top to the scale rather than the slowest lap:
-                    # one lap in traffic behind a backmarker is worth ten
-                    # seconds, and letting it set the range squashes the
-                    # tenths that the rest of the chart is about.
-                    floor = min(clean_times)
-                    ceiling = float(np.quantile(clean_times, 0.95)) + 1.5
-                    fig_h2h.update_yaxes(range=[floor - 0.6, ceiling], row=1, col=1)
+                    # one lap stuck behind a backmarker is worth ten seconds,
+                    # and letting it set the range squashes the tenths the
+                    # rest of the chart is about.
+                    fig_h2h.update_yaxes(range=[floor, ceiling], row=1, col=1)
                 fig_h2h.update_yaxes(title_text="Lap time (s)", row=1, col=1)
                 fig_h2h.update_yaxes(title_text="Gap (s)", row=2, col=1)
                 fig_h2h.update_xaxes(title_text="Lap", row=2, col=1)

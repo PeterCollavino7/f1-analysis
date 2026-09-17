@@ -1,7 +1,26 @@
 # F1 Analysis
 
-Personal F1 data analysis project, built on [FastF1](https://docs.fastf1.dev/) (official timing
-and telemetry data).
+Personal Formula 1 data analysis project, built on [FastF1](https://docs.fastf1.dev/) (official
+timing and telemetry data): a Streamlit dashboard for a race weekend, a season and the sport's
+all-time records, plus the standalone tyre-degradation script it grew out of.
+
+Everything runs locally — there is no server, no account and no database. A session is fetched
+from the F1 API the first time it's opened and read from disk after that.
+
+> Unofficial personal project. Not affiliated with, endorsed by, or connected to Formula 1,
+> the FIA or any team; F1 and Formula 1 are trademarks of their respective owners. The data
+> comes from public APIs through FastF1 and Ergast, and none of it is redistributed here.
+
+![The race weekend view: headline stats and the race classification](assets/screenshot-weekend.png)
+
+Two drivers' race pace lap by lap, the marker carrying the compound each lap was run on, with
+the cumulative gap between them underneath:
+
+![Head-to-head race pace](assets/screenshot-pace.png)
+
+And the season view — standings, points progression, title odds:
+
+![The season view](assets/screenshot-season.png)
 
 ## Setup
 
