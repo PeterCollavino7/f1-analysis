@@ -68,7 +68,9 @@ any local run — none of this is used.
     **Race pace** (tyre strategy, a two-driver head-to-head of every lap time with the
     compound on the marker and the
     cumulative gap under it, overtakes, race-pace spread as a box per driver, and fuel-corrected
-    tyre degradation) and **Head-to-head** (the mini-sector track dominance map,
+    tyre degradation; in a qualifying session this tab is **Stats** instead: gap to pole, time
+    lost against each driver's ideal lap, and the season's poles) and **Head-to-head** (the
+    mini-sector track dominance map,
     the official sector splits as a diverging gap chart, and a five-panel lap trace — speed,
     delta, throttle, brake, gear — with x-linked axes, so zooming one panel zooms all five).
     The session dropdown is built from that weekend's real `Session1..5` names in the FastF1
