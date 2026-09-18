@@ -2370,10 +2370,14 @@ if section == SECTION_WEEKEND:
 
 # ------------------------------------------------------------------ pace --
 
-def render_pace_tab():
+def render_position_chart():
+    """Every driver's position lap by lap -- the first chart on the Results
+    tab. It replaced a grid-to-finish slope chart there: that one joined only
+    each driver's start and finish, and this shows the same two ends plus the
+    whole race in between, so the slope chart had nothing left to add."""
     position_laps = session.laps.dropna(subset=["Position", "LapNumber"])
     if position_laps.empty:
-        st.info("No lap-by-lap position data available for this session.")
+        return
     else:
         field_order = order_by_classification(session, position_laps["Driver"].unique())
         field_style = build_driver_styles(field_order, session)
@@ -2436,8 +2440,8 @@ def render_pace_tab():
 
             st.plotly_chart(fig_position, width="stretch", config=PLOTLY_CONFIG)
 
-    st.write("")
 
+def render_pace_tab():
     strategy_laps = session.laps.dropna(subset=["Stint", "Compound", "LapNumber"])
     if strategy_laps.empty:
         st.info("No stint data available for a strategy timeline in this session.")
@@ -3167,78 +3171,9 @@ if section == SECTION_WEEKEND:
             ):
                 render_table(rows, columns)
 
-            # Grid to finish, as a slope chart. The table's own +/- column says
-            # how far each driver moved; this says *where* they moved through,
-            # which is what makes a recovery drive visible as a line cutting
-            # across the whole field rather than a number in a cell.
-            movers = classified.dropna(subset=["GridPosition", "Position"])
-            movers = movers[movers["GridPosition"] > 0]
-            if not has_quali_times and len(movers) >= 3:
+            if not has_quali_times:
                 st.write("")
-                with chart_panel(
-                    "Grid to finish",
-                    "Every driver's start and finish position, joined",
-                    accent=PALETTE["teal"],
-                ):
-                    fig_slope = base_figure("", "Position", "", hovermode="closest")
-                    fig_slope.update_layout(
-                        height=max(CHART_HEIGHT, 24 * len(movers) + 80),
-                        showlegend=False, margin=dict(l=60, r=90, t=28, b=30),
-                    )
-                    # An explicit range, as on the position chart: a reversed
-                    # autorange padded the axis out to a P0 above the pole
-                    # sitter and a P23 below the last finisher.
-                    last_place = int(movers["Position"].max())
-                    fig_slope.update_yaxes(
-                        autorange=False, range=[last_place + 0.6, 0.4],
-                        dtick=1, showgrid=True, tickfont=dict(size=11),
-                    )
-                    fig_slope.update_xaxes(
-                        tickmode="array", tickvals=[0, 1], ticktext=["GRID", "FINISH"],
-                        range=[-0.12, 1.32], showgrid=False, showspikes=False,
-                        tickfont=dict(size=11, color="rgba(226,232,240,0.55)"),
-                    )
-                    # Most of a field finishes within a place or two of where
-                    # it started, and twenty near-parallel lines say nothing.
-                    # The chart earns its place on the few drivers who actually
-                    # moved, so those are drawn at full strength and the rest
-                    # recede -- the crossing lines are the story, not the flat
-                    # ones.
-                    BIG_MOVE = 3
-                    for _, r in movers.iterrows():
-                        grid_pos, finish_pos = int(r["GridPosition"]), int(r["Position"])
-                        moved = grid_pos - finish_pos
-                        eventful = abs(moved) >= BIG_MOVE
-                        color = safe_driver_color(r["Abbreviation"], session)
-                        sign = "+" if moved > 0 else ""
-                        fig_slope.add_trace(
-                            go.Scatter(
-                                x=[0, 1], y=[grid_pos, finish_pos],
-                                mode="lines+markers+text",
-                                opacity=1.0 if eventful else 0.45,
-                                line=dict(
-                                    color=color, width=3.2 if eventful else 1.6,
-                                    shape="spline", smoothing=0.6,
-                                ),
-                                marker=dict(
-                                    size=9 if eventful else 6.5, color=color,
-                                    line=dict(color="#0b0e15", width=1.5),
-                                ),
-                                text=["", f"  {r['Abbreviation']} <b>{sign}{moved if moved else '='}</b>"],
-                                textposition="middle right",
-                                textfont=dict(
-                                    size=11.5 if eventful else 10,
-                                    color=PALETTE["teal"] if moved > 0 else (
-                                        "#ff6b6b" if moved < 0 else "rgba(226,232,240,0.55)"
-                                    ),
-                                ),
-                                hovertemplate=(
-                                    f"{r['Abbreviation']}: P{grid_pos} → P{finish_pos}"
-                                    f" ({sign}{moved})<extra></extra>"
-                                ),
-                            )
-                        )
-                    st.plotly_chart(fig_slope, width="stretch", config=PLOTLY_CONFIG)
+                render_position_chart()
 
 # ------------------------------------------------------------- standings --
 

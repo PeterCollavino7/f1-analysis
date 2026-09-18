@@ -64,9 +64,9 @@ any local run — none of this is used.
   championship) and **All-time records** (the sport).
   - *Race weekend* opens on a headline strip — winner, fastest lap, speed trap, biggest mover —
     over three tabs in the order a weekend is actually read: **Results** (classification with a
-    places-gained column, plus a grid-to-finish slope chart that emphasises the drivers who
-    actually moved), **Race pace** (position by lap with the podium band shaded, tyre strategy,
-    a two-driver head-to-head of every lap time with the compound on the marker and the
+    places-gained column, plus every driver's position lap by lap with the podium band shaded),
+    **Race pace** (tyre strategy, a two-driver head-to-head of every lap time with the
+    compound on the marker and the
     cumulative gap under it, overtakes, race-pace spread as a box per driver, and fuel-corrected
     tyre degradation) and **Head-to-head** (the mini-sector track dominance map,
     the official sector splits as a diverging gap chart, and a five-panel lap trace — speed,
