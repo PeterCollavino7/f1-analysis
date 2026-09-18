@@ -1783,8 +1783,11 @@ if section == SECTION_WEEKEND:
     # actually read -- what happened, how the race ran, then the lap-by-lap
     # forensics. (Telemetry used to be first, which opened the page on the
     # deepest view of all.)
+    # A qualifying session has no race to pace: its middle tab is "Stats"
+    # instead (gap to pole, ideal lap, the season's poles) -- see
+    # render_quali_stats().
     tab_classification, tab_pace, tab_telemetry = st.tabs(
-        ["Results", "Race pace", "Head-to-head"]
+        ["Results", "Stats" if "Qualifying" in session_name else "Race pace", "Head-to-head"]
     )
 elif section == SECTION_SEASON:
     render_hero(
@@ -2441,6 +2444,74 @@ def render_position_chart():
             st.plotly_chart(fig_position, width="stretch", config=PLOTLY_CONFIG)
 
 
+def render_quali_stats():
+    """Gap to pole and ideal lap, the two numbers a qualifying session is
+    read by. Deleted laps (track limits) are left out of both: a lap that
+    didn't count for the grid shouldn't count here either."""
+    laps = session.laps
+    if "Deleted" in laps.columns:
+        laps = laps[laps["Deleted"] != True]  # noqa: E712 -- the column holds NaN too
+    timed = laps.dropna(subset=["LapTime"])
+    if timed.empty:
+        st.info("No timed laps in this session.")
+        return
+    best = timed.groupby("Driver")["LapTime"].min().dt.total_seconds().sort_values()
+    order = list(reversed(best.index))  # fastest at the top of a horizontal bar chart
+    colors = [safe_driver_color(d, session) for d in order]
+
+    col_gap, col_ideal = st.columns(2)
+    with col_gap:
+        with chart_panel("Gap to pole", "Each driver's best lap, behind the fastest", accent=PALETTE["red"]):
+            gap = (best - best.iloc[0])[order]
+            fig_gap = base_figure("", "", "Seconds behind")
+            fig_gap.update_layout(showlegend=False)
+            fig_gap.update_yaxes(tickfont=dict(size=11))
+            fig_gap.add_trace(
+                go.Bar(
+                    x=gap.to_numpy(), y=order, orientation="h",
+                    marker=dict(color=colors, line=dict(color="rgba(255,255,255,0.10)", width=1)),
+                    text=["POLE" if g == 0 else f"+{g:.3f}" for g in gap], textposition="outside", cliponaxis=False,
+                    hovertemplate="%{y}: +%{x:.3f} s<extra></extra>",
+                )
+            )
+            size_horizontal_bars(fig_gap, gap.to_numpy(), row_px=26, bar_px=16)
+            style_bars(fig_gap)
+            st.plotly_chart(fig_gap, width="stretch", config=PLOTLY_CONFIG)
+
+    with col_ideal:
+        with chart_panel(
+            "Time left on the table", "Best lap minus the sum of the driver's best sectors",
+            accent=PALETTE["amber"],
+        ):
+            sectors = timed.groupby("Driver")[["Sector1Time", "Sector2Time", "Sector3Time"]].min()
+            ideal = sectors.sum(axis=1, min_count=3).dt.total_seconds()
+            lost = (best - ideal).dropna().clip(lower=0)
+            lost = lost.reindex([d for d in order if d in lost.index])
+            fig_ideal = base_figure("", "", "Seconds")
+            fig_ideal.update_layout(showlegend=False)
+            fig_ideal.update_yaxes(tickfont=dict(size=11))
+            fig_ideal.add_trace(
+                go.Bar(
+                    x=lost.to_numpy(), y=list(lost.index), orientation="h",
+                    marker=dict(
+                        color=[safe_driver_color(d, session) for d in lost.index],
+                        line=dict(color="rgba(255,255,255,0.10)", width=1),
+                    ),
+                    text=[f"{v:.3f}" for v in lost], textposition="outside", cliponaxis=False,
+                    hovertemplate="%{y}: %{x:.3f} s off their ideal lap<extra></extra>",
+                )
+            )
+            size_horizontal_bars(fig_ideal, lost.to_numpy(), row_px=26, bar_px=16)
+            style_bars(fig_ideal)
+            st.plotly_chart(fig_ideal, width="stretch", config=PLOTLY_CONFIG)
+    method_note(
+        "**Ideal lap** is the sum of a driver's three best sector times, wherever in the "
+        "session each was set. The bar is how much slower their best actual lap was than that "
+        "-- a driver who strung their best sectors together on one lap scores zero. Drivers "
+        "stay in order of their best lap, as in the gap chart beside it, so the two read row by row."
+    )
+
+
 def render_pace_tab():
     strategy_laps = session.laps.dropna(subset=["Stint", "Compound", "LapNumber"])
     if strategy_laps.empty:
@@ -3017,12 +3088,8 @@ if section == SECTION_WEEKEND:
         # etc. info boxes, this just says so once and points at the tab that
         # actually fits a qualifying lap.
         if "Qualifying" in session_name:
-            st.caption(
-                f"{session_name} is single push laps, not race stints, so there's no pace or tyre "
-                "degradation to show here -- for lap comparisons within this session, use the "
-                "Head-to-head telemetry tab instead. What does fit a qualifying session is the "
-                "season's pole position picture, below."
-            )
+            render_quali_stats()
+            st.write("")
             poles = pole_positions(year, tuple(schedule["EventName"].tolist()))
             if poles.empty:
                 st.info("No completed qualifying sessions to count poles from yet.")
