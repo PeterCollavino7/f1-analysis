@@ -464,6 +464,47 @@ st.markdown(
     .stat-card .sub { margin-top: 0.35rem; font-size: 0.78rem; color: var(--ink-dim); line-height: 1.45; }
     .stat-card .sub b { color: var(--card-accent, var(--ink)); font-weight: 700; }
 
+    /* ------------------------------------------------------ driver pills */
+    /* The head-to-head picker (driver_picker). Each pill's --pill color is
+       set per button, in option order, by a small rule block the picker
+       writes itself; everything else lives here. Selected is read from
+       aria-pressed, which react-aria sets on the button. */
+    [class*="st-key-drivers_"] [role="toolbar"] { gap: 6px; }
+    [class*="st-key-drivers_"] button[data-variant] {
+        display: inline-flex; align-items: center;
+        min-height: 0; padding: 5px 13px 5px 10px;
+        border-radius: 999px !important;
+        background: rgba(255, 255, 255, 0.03) !important;
+        border: 1px solid var(--line-strong) !important;
+        transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.08s ease;
+    }
+    [class*="st-key-drivers_"] button[data-variant]::before {
+        content: ""; flex: none;
+        width: 8px; height: 8px; margin-right: 8px; border-radius: 50%;
+        background: var(--pill, #999999);
+        box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
+    }
+    [class*="st-key-drivers_"] button[data-variant] p {
+        font-family: var(--mono); font-size: 0.8rem; font-weight: 600;
+        letter-spacing: 0.04em; color: var(--ink-dim);
+    }
+    [class*="st-key-drivers_"] button[data-variant]:hover {
+        border-color: var(--pill, #999999) !important;
+        background: color-mix(in srgb, var(--pill, #999999) 10%, transparent) !important;
+    }
+    [class*="st-key-drivers_"] button[data-variant]:hover p { color: var(--ink); }
+    [class*="st-key-drivers_"] button[data-variant]:active { transform: scale(0.96); }
+    [class*="st-key-drivers_"] button[aria-pressed="true"] {
+        border-color: var(--pill) !important;
+        background: color-mix(in srgb, var(--pill) 26%, transparent) !important;
+        box-shadow: 0 0 14px -4px var(--pill);
+    }
+    [class*="st-key-drivers_"] button[aria-pressed="true"] p { color: #ffffff; }
+    @media (prefers-reduced-motion: reduce) {
+        [class*="st-key-drivers_"] button[data-variant] { transition: none; }
+        [class*="st-key-drivers_"] button[data-variant]:active { transform: none; }
+    }
+
     /* ------------------------------------------------------- driver cards */
     .driver-card {
         position: relative; overflow: hidden;
@@ -1822,6 +1863,61 @@ st.sidebar.markdown(
 
 # ------------------------------------------------------------- telemetry --
 
+def driver_picker():
+    """The head-to-head driver choice: one pill per driver, teammates side by
+    side, each marked with its team color. Replaced a multiselect dropdown,
+    which took an open-scroll-pick-reopen round per driver, offered a "Select
+    all" that made no sense with a limit of two, and simply refused a third
+    pick. Here every driver is in view, one click toggles, and a third pick
+    replaces the older of the two.
+
+    Starts empty (a choice, not whichever two come first), and the widget key
+    carries the session, so switching race or session starts over rather
+    than carrying over drivers the new session may not even have.
+    """
+    results = session.results.sort_values("Position")
+    with_laps = set(session.laps["Driver"].unique())
+    # Teams in order of their best finisher, teammates adjacent.
+    teams = list(dict.fromkeys(results["TeamName"]))
+    order = [
+        d for team in teams
+        for d in results.loc[results["TeamName"] == team, "Abbreviation"] if d in with_laps
+    ]
+    order += sorted(with_laps - set(order))  # anyone the results don't list
+
+    key = "drivers_" + re.sub(r"\W+", "_", f"{year}_{event_name}_{session_name}")
+    history_key = key + "_order"
+
+    def keep_newest_two():
+        # st.pills has no max_selections, and it reports the selection in
+        # option order, not click order -- so the click order is tracked
+        # here, both to know which pick is the oldest and to keep the first
+        # driver chosen as the reference lap.
+        current = st.session_state.get(key) or []
+        previous = st.session_state.get(history_key, [])
+        ordered = [d for d in previous if d in current] + [d for d in current if d not in previous]
+        ordered = ordered[-MAX_DRIVERS:]
+        st.session_state[key] = ordered
+        st.session_state[history_key] = ordered
+
+    st.pills(
+        "Drivers · pick two to compare, a third replaces the first",
+        options=order, selection_mode="multi", default=[], key=key, on_change=keep_newest_two,
+    )
+    selected = [d for d in st.session_state.get(history_key, []) if d in order]
+
+    # Team color per pill, via nth-of-type on the buttons in option order.
+    # A selected pill takes the color its line will have on the charts, which
+    # for the second driver of a team is white (see build_driver_styles).
+    line_color = {d: c for d, (c, _) in build_driver_styles(selected, session).items()}
+    rules = []
+    for i, driver in enumerate(order, start=1):
+        color = line_color.get(driver) or safe_driver_color(driver, session)
+        rules.append(f".st-key-{key} button:nth-of-type({i}) {{ --pill: {color}; }}")
+    st.markdown("<style>" + "\n".join(rules) + "</style>", unsafe_allow_html=True)
+    return selected
+
+
 def render_telemetry_tab():
     """Head-to-head telemetry for the two selected drivers.
 
@@ -1830,17 +1926,7 @@ def render_telemetry_tab():
     sibling tabs down with it, since Streamlit runs the whole script
     top to bottom on every rerun whatever tab is on screen.
     """
-    all_drivers = sorted(session.laps["Driver"].unique())
-    selected_drivers = st.multiselect(
-        "Drivers (max 2)",
-        options=all_drivers,
-        # Empty on purpose: the tab opens asking for a choice instead of on
-        # whichever two drivers happen to come first in the list.
-        default=[],
-        placeholder="Choose one or two drivers",
-        max_selections=MAX_DRIVERS,
-        key="telemetry_drivers",
-    )
+    selected_drivers = driver_picker()
     # st.segmented_control rather than a radio: this is a two-way toggle
     # between unit systems, not a list of choices, and the segmented
     # control renders it as one -- it can also return None (nothing
@@ -1931,24 +2017,6 @@ def render_telemetry_tab():
         sector_checkpoints = {}
 
     driver_style = build_driver_styles(selected_drivers, session)
-
-    # st.multiselect only themes its tags with one fixed accent color and
-    # exposes no per-tag styling parameter. Confirmed from actual DevTools
-    # inspection: the tag isn't BaseWeb's data-baseweb="tag" at all -- it's
-    # a plain `<span title="BOR" class="st-emotion-cache-...">BOR</span>`,
-    # and the title attribute carries the exact driver code. Turned out that
-    # span is only a small inner element, not the visible pill itself (the
-    # first version of this only recolored a little square, leaving the red
-    # pill it sits inside untouched) -- the pill is its *parent*, reached
-    # here with :has() since plain CSS has no other way to select upward.
-    tag_rules = "\n".join(
-        f'span:has(> span[title="{d}"]) {{ '
-        f"background-color: {driver_style[d][0]} !important; "
-        f'color: {"#111111" if driver_style[d][0].lower() == "#ffffff" else "#ffffff"} !important; }}\n'
-        f'span[title="{d}"] {{ background-color: transparent !important; }}'
-        for d in selected_drivers
-    )
-    st.markdown(f"<style>{tag_rules}</style>", unsafe_allow_html=True)
 
     cards = st.columns(len(selected_drivers))
     for col, driver in zip(cards, selected_drivers):
