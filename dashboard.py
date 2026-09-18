@@ -746,7 +746,7 @@ def season_stats(year, event_names):
             # and memory, and across a whole season it's what pushed this past
             # the hosted app's ~1 GB.
             race.load(telemetry=False, weather=False)
-            race.laps  # raises if they didn't load, so the race is skipped
+            _ = race.laps  # raises if they didn't load, so the race is skipped
         except Exception:
             continue
         race_overtakes = count_overtakes(race)
@@ -1008,7 +1008,10 @@ def load_session(year, event, session_name, telemetry=True):
     finally:
         fastf1_logger.removeHandler(handler)
     try:
-        session.laps
+        # Assigned, not a bare expression: Streamlit "magic" renders any bare
+        # expression in the script, and this one put the raw laps table on top
+        # of the page.
+        _ = session.laps
     except fastf1.core.DataNotLoadedError:
         failures = [m for m in problems if "fail" in m.lower() or "error" in m.lower()]
         raise RuntimeError("the lap timing data didn't download. " + " | ".join((failures or problems)[:3]))
