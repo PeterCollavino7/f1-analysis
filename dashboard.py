@@ -677,7 +677,11 @@ st.markdown(
 )
 
 
-@st.cache_data(ttl=3600, show_spinner="Loading the championship standings...")
+# A day for both standings loaders: the round is part of the cache key, so a
+# new race is picked up at once anyway, and the Ergast mirror (jolpica)
+# rate-limits by the hour -- the progression alone is two requests per round
+# already run, and answering "Too Many Requests" is what a short ttl bought.
+@st.cache_data(ttl=86400, show_spinner="Loading the championship standings...")
 def load_standings(year, round_number):
     """Championship standings as they stood right after a given round --
     pulled from Ergast (via fastf1.ergast) rather than summed from each
@@ -690,7 +694,7 @@ def load_standings(year, round_number):
     return drivers, constructors
 
 
-@st.cache_data(ttl=3600, show_spinner="Rebuilding the points table round by round...")
+@st.cache_data(ttl=86400, show_spinner="Rebuilding the points table round by round...")
 def load_standings_progression(year, up_to_round):
     """Points after each round of the season so far, long-format. Ergast's
     standings endpoint with no round given returns only the latest snapshot
