@@ -1834,7 +1834,10 @@ def render_telemetry_tab():
     selected_drivers = st.multiselect(
         "Drivers (max 2)",
         options=all_drivers,
-        default=all_drivers[:2],
+        # Empty on purpose: the tab opens asking for a choice instead of on
+        # whichever two drivers happen to come first in the list.
+        default=[],
+        placeholder="Choose one or two drivers",
         max_selections=MAX_DRIVERS,
         key="telemetry_drivers",
     )
@@ -1850,7 +1853,7 @@ def render_telemetry_tab():
     dist_unit = "ft" if imperial else "m"
 
     if not selected_drivers:
-        st.info("Select at least one driver above.")
+        st.info("Choose one or two drivers above to compare their fastest laps.")
         return
 
     # pick_fastest() returns None for a driver with no timed lap at all --
