@@ -4,8 +4,9 @@ Personal Formula 1 data analysis project, built on [FastF1](https://docs.fastf1.
 timing and telemetry data): a Streamlit dashboard for a race weekend, a season and the sport's
 all-time records, plus the standalone tyre-degradation script it grew out of.
 
-Everything runs locally — there is no server, no account and no database. A session is fetched
-from the F1 API the first time it's opened and read from disk after that.
+**Live: [pitwall-pc.streamlit.app](https://pitwall-pc.streamlit.app/)** — or run it locally, where a
+session is fetched from the F1 API the first time it's opened and read from disk after that.
+There is no account and no database either way.
 
 > Unofficial personal project. Not affiliated with, endorsed by, or connected to Formula 1,
 > the FIA or any team; F1 and Formula 1 are trademarks of their respective owners. The data
@@ -29,6 +30,18 @@ python -m venv venv
 venv\Scripts\pip install -r requirements.txt
 mkdir cache
 ```
+
+## Hosted version
+
+The official timing feed answers 403 to datacenter IPs — checked from Streamlit Community Cloud
+and from GitHub Actions runners — so the hosted app can't download sessions the way a local run
+does. Instead `publish_data.py` runs on a home PC (a daily Windows scheduled task): it loads every
+finished session through FastF1 and uploads that session's cache folder, zipped, to a private
+data repo. The hosted app, given a read-only token for that repo in its Streamlit secrets
+(`F1_DATA_TOKEN`), downloads a session's files right before opening it, and FastF1 reads them
+from disk without calling the feed. Only published sessions are listed there; a new race shows
+up the day after it's run, as long as that PC is switched on at some point. Without the token —
+any local run — none of this is used.
 
 ## Scripts
 

@@ -5,10 +5,12 @@ degradation, for any past race weekend and any of its actual sessions.
 Run with: venv\\Scripts\\streamlit run dashboard.py
 """
 import datetime
+import io
 import logging
 import os
 import re
 import urllib.parse
+import zipfile
 from contextlib import contextmanager
 
 import streamlit as st
@@ -28,6 +30,7 @@ import fastf1.plotting
 from fastf1.ergast import Ergast
 import numpy as np
 import pandas as pd
+import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -737,11 +740,13 @@ def season_stats(year, event_names):
     for event_name in event_names:
         try:
             race = fastf1.get_session(year, event_name, "Race")
+            fetch_published(race, year, telemetry=False)
             # Laps and race control messages are all count_overtakes() and the
             # results columns read. Telemetry is most of a session's download
             # and memory, and across a whole season it's what pushed this past
             # the hosted app's ~1 GB.
             race.load(telemetry=False, weather=False)
+            race.laps  # raises if they didn't load, so the race is skipped
         except Exception:
             continue
         race_overtakes = count_overtakes(race)
@@ -793,6 +798,7 @@ def pole_positions(year, event_names):
     for event_name in event_names:
         try:
             quali = fastf1.get_session(year, event_name, "Qualifying")
+            fetch_published(quali, year, telemetry=False)
             quali.load(laps=False, telemetry=False, weather=False, messages=False)
         except Exception:
             continue
@@ -864,13 +870,108 @@ def load_schedule(year):
     return schedule.sort_values("RoundNumber", ascending=False)
 
 
+# ------------------------------------------------------ published data --
+# The official timing feed answers 403 to datacenter IPs, so on the hosted
+# app FastF1 can't download a session itself. publish_data.py, run from a
+# home connection, uploads each session's FastF1 cache folder as release
+# assets of this private repo; the functions below download and unpack one
+# into cache/ right before FastF1 opens it, and FastF1 then reads it from
+# disk without ever calling the feed. With no token configured (a local run)
+# all of this is skipped and FastF1 downloads from the feed as it always did.
+DATA_REPO = "PeterCollavino7/f1-data"
+
+
+def data_store_token():
+    try:
+        return st.secrets.get("F1_DATA_TOKEN")
+    except Exception:
+        return None  # no secrets file at all -- a local run
+
+
+def github_headers(accept="application/vnd.github+json"):
+    return {"Authorization": f"Bearer {data_store_token()}", "Accept": accept}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def published_assets(year):
+    """{asset name: API url} for the season's release; empty if there's no
+    release for that year."""
+    release = requests.get(
+        f"https://api.github.com/repos/{DATA_REPO}/releases/tags/{year}", headers=github_headers(), timeout=20,
+    )
+    if release.status_code == 404:
+        return {}
+    release.raise_for_status()
+    assets, page = {}, 1
+    while True:
+        # The release object's own asset list isn't the place to read a full
+        # season from; this endpoint pages through all of them.
+        batch = requests.get(
+            f"https://api.github.com/repos/{DATA_REPO}/releases/{release.json()['id']}/assets",
+            headers=github_headers(), params={"per_page": 100, "page": page}, timeout=20,
+        ).json()
+        assets.update({a["name"]: a["url"] for a in batch})
+        if len(batch) < 100:
+            return assets
+        page += 1
+
+
+def session_key(session):
+    # Same naming as publish_data.py: the event and session folders of the
+    # session's api_path, which is also its folder under the FastF1 cache.
+    _, _, event_dir, session_dir = session.api_path.strip("/").split("/")
+    return f"{event_dir}__{session_dir}"
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def published_sessions(year):
+    """{event name: [session names]} that have been published for the
+    season -- the hosted app lists only these, since anything else would fail
+    to load."""
+    published = published_assets(year)
+    available = {}
+    if not published:
+        return available
+    for _, event in load_schedule(year).iterrows():
+        for name in session_names_for(event):
+            key = session_key(fastf1.get_session(year, event["EventName"], name))
+            if f"{key}.base.zip" in published:
+                available.setdefault(event["EventName"], []).append(name)
+    return available
+
+
+def fetch_published(session, year, telemetry):
+    """Unpack the session's published cache into cache/ if it isn't there
+    yet. Telemetry is a separate, much bigger asset, fetched only when asked
+    for, so the season views never pay for it."""
+    if data_store_token() is None:
+        return
+    key = session_key(session)
+    folder = os.path.join("cache", *session.api_path.strip("/").split("/")[1:])
+    for part in ("base", "telemetry") if telemetry else ("base",):
+        marker = os.path.join(folder, f".{part}-unpacked")
+        url = published_assets(year).get(f"{key}.{part}.zip")
+        if os.path.exists(marker) or url is None:
+            continue
+        # requests drops the Authorization header on the redirect to GitHub's
+        # storage host, which is what that host requires.
+        response = requests.get(url, headers=github_headers("application/octet-stream"), timeout=180)
+        response.raise_for_status()
+        os.makedirs(folder, exist_ok=True)
+        zipfile.ZipFile(io.BytesIO(response.content)).extractall(folder)
+        open(marker, "w").close()
+
+
 def available_years():
     """Seasons with at least one completed round, newest first. The current
     year only joins the list once its first race is over: between New Year and
     the season opener it has nothing to show, and an empty Grand Prix dropdown
-    would leave the rest of the page with no event to load."""
+    would leave the rest of the page with no event to load. On the hosted app
+    a season is listed once it has published data, for the same reason."""
     this_year = datetime.datetime.now(datetime.timezone.utc).year
     years = list(range(this_year, FIRST_YEAR - 1, -1))
+    if data_store_token() is not None:
+        return [y for y in years if published_assets(y)]
     try:
         if load_schedule(this_year).empty:
             years.remove(this_year)
@@ -887,6 +988,7 @@ def available_years():
 @st.cache_data(ttl=6 * 3600, max_entries=3, show_spinner="Loading timing and telemetry for this session...")
 def load_session(year, event, session_name, telemetry=True):
     session = fastf1.get_session(year, event, session_name)
+    fetch_published(session, year, telemetry)
     # load() doesn't raise when the timing feed fails -- it logs, returns, and
     # leaves session.laps unset, so the first chart to touch the laps crashed
     # with a raw traceback. The laps are touched here instead, which turns
@@ -1622,6 +1724,9 @@ if section in (SECTION_WEEKEND, SECTION_SEASON):
     st.sidebar.divider()
     year = st.sidebar.selectbox("Year", options=available_years())
     schedule = load_schedule(year)
+    published = published_sessions(year) if data_store_token() is not None else None
+    if published is not None:
+        schedule = schedule[schedule["EventName"].isin(published)]
     event_name = st.sidebar.selectbox(
         "Grand Prix" if section == SECTION_WEEKEND else "Standings after",
         options=schedule["EventName"].tolist(),
@@ -1631,7 +1736,10 @@ if section in (SECTION_WEEKEND, SECTION_SEASON):
     # teams, and fastf1.plotting needs a loaded session to do that -- the
     # weekend's race is the one that's always there.
     session_name = (
-        st.sidebar.selectbox("Session", options=session_names_for(event_row))
+        st.sidebar.selectbox(
+            "Session",
+            options=[n for n in session_names_for(event_row) if published is None or n in published[event_name]],
+        )
         if section == SECTION_WEEKEND else "Race"
     )
     try:
