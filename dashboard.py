@@ -3197,7 +3197,7 @@ def render_pace_tab():
             "Fuel-corrected · dotted lines are the fitted degradation trend per compound",
             accent=COMPOUND_COLORS["SOFT"],
         ):
-            laps_label = "Individual laps" + (f" · {pace_drivers[0]}" if pace_drivers else "")
+            laps_label = f"Selected driver: {pace_drivers[0]}" if pace_drivers else "Select driver"
             # Keyed and stateful so the pick can close it: every pick is a
             # finished choice here, and the chart it changes is right under
             # the popover, so the popover gets out of the way at once instead
