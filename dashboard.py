@@ -2240,13 +2240,17 @@ def render_telemetry_tab():
         fig_telemetry.add_vrect(
             x0=edge_index[1], x1=edge_index[2],
             fillcolor="rgba(255,255,255,0.05)", line_width=0, layer="below",
-            row="all", col=1,
+            row="all", col=1, exclude_empty_subplots=False,
         )
+        # exclude_empty_subplots=False on both: with row="all", Plotly skips
+        # every subplot that has no trace yet, and the driver traces are only
+        # added further down -- so by default the band and both lines were
+        # silently dropped from all five panels.
         for idx in edge_index[1:3]:
             fig_telemetry.add_vline(
                 x=idx, line_dash="dot",
                 line_color="rgba(255,255,255,0.5)", line_width=1.5,
-                row="all", col=1,
+                row="all", col=1, exclude_empty_subplots=False,
             )
         # The labels sit *inside* the top of the speed panel, not above it: at
         # y=1 they landed in the same strip as the "Speed" subplot title and
