@@ -1866,7 +1866,13 @@ st.sidebar.markdown(
 
 # ------------------------------------------------------------- telemetry --
 
-def driver_picker(name, label, help_text, eligible):
+def picker_key(name):
+    # The "drivers_" prefix is what the pill stylesheet matches on; the
+    # session in the key makes a new race or session start from nothing.
+    return f"drivers_{name}_" + re.sub(r"\W+", "_", f"{year}_{event_name}_{session_name}")
+
+
+def driver_picker(name, label, help_text, eligible, limit=MAX_DRIVERS):
     """A two-driver choice: one pill per driver, teammates side by side, each
     marked with its team color. Used by the Head-to-head tab and by the race
     pace comparison; `name` keeps their selections apart, `eligible` is who
@@ -1890,8 +1896,7 @@ def driver_picker(name, label, help_text, eligible):
     ]
     order += sorted(with_laps - set(order))  # anyone the results don't list
 
-    # The "drivers_" prefix is what the pill stylesheet matches on.
-    key = f"drivers_{name}_" + re.sub(r"\W+", "_", f"{year}_{event_name}_{session_name}")
+    key = picker_key(name)
     history_key = key + "_order"
 
     def keep_newest_two():
@@ -1908,9 +1913,12 @@ def driver_picker(name, label, help_text, eligible):
 
     st.pills(
         label, options=order, selection_mode="multi", default=[], key=key,
-        on_change=keep_newest_two, help=help_text,
+        on_change=keep_newest_two if limit else None, help=help_text,
     )
-    selected = [d for d in st.session_state.get(history_key, []) if d in order]
+    if limit:
+        selected = [d for d in st.session_state.get(history_key, []) if d in order]
+    else:
+        selected = [d for d in (st.session_state.get(key) or []) if d in order]
 
     # Team color per pill, via nth-of-type on the buttons in option order.
     # A selected pill takes the color its line will have on the charts, which
@@ -2989,7 +2997,15 @@ def render_pace_tab():
         )
 
         pace_driver_options = sorted(pace_laps["Driver"].unique())
-        pace_drivers = st.multiselect("Show individual laps for", options=pace_driver_options, default=[])
+        # Chosen in a popover inside the chart's panel (below), not in a
+        # widget that stays open above it: few people use it, and a third
+        # permanent driver picker on this tab was one too many. The figure is
+        # built before that popover is drawn, so the choice is read straight
+        # from session state -- a widget's new value is already there when
+        # the rerun it triggered starts.
+        pace_drivers = [
+            d for d in (st.session_state.get(picker_key("laps")) or []) if d in pace_driver_options
+        ]
 
         fig_pace = base_figure("", "Lap time (s), fuel-corrected", "Tyre life (laps)")
 
@@ -3075,8 +3091,6 @@ def render_pace_tab():
                         hovertemplate="%{text}<extra></extra>",
                     )
                 )
-        else:
-            st.caption("Pick one or more drivers above to see their individual laps under the trend lines.")
 
         for compound, fit in fits.items():
             x_fit = np.linspace(*fit["life_range"], 2)
@@ -3106,6 +3120,14 @@ def render_pace_tab():
             "Fuel-corrected · dotted lines are the fitted degradation trend per compound",
             accent=COMPOUND_COLORS["SOFT"],
         ):
+            laps_label = "Individual laps" + (f" · {', '.join(pace_drivers)}" if pace_drivers else "")
+            with st.popover(laps_label, icon=":material/person_search:"):
+                driver_picker(
+                    "laps", "Show each lap for",
+                    "Every lap of the chosen drivers' stints, fuel-corrected like the trend lines, "
+                    "plotted under them. Pick as many as you like; click a driver again to remove them.",
+                    pace_driver_options, limit=None,
+                )
             st.plotly_chart(fig_pace, width="stretch", config=PLOTLY_CONFIG)
 
         if not coeffs:
