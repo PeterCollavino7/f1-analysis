@@ -2224,32 +2224,24 @@ def render_telemetry_tab():
     if sector_checkpoints:
         band_edges = [0.0] + list(shared_checkpoint_distance[1:3]) + [float(common_distance_m[-1])]
         edge_index = [int(np.argmin(np.abs(common_distance_m - edge))) for edge in band_edges]
-        # Sector 2 gets a tinted band rather than being left as the gap between
-        # two faint dotted lines: across five stacked panels the eye never
-        # traced a hairline down all of them, so where one sector ended and the
-        # next began was guesswork. Shading the middle one makes all three
-        # readable at a glance -- S1 is what's left of the band, S3 what's
-        # right of it.
+        # One thin solid line at the end of S1 and of S2, through all five
+        # panels. Tried before it: dotted lines at half opacity, which broke up
+        # into noise across the dense throttle and brake traces, and a tinted
+        # band over sector 2, which Peter found heavy -- a faint continuous
+        # line marks the boundary without competing with the data.
         # Shapes take the *index* of the category, not its label. The x axis
         # here is a category axis (the tick labels carry the unit, which a
         # numeric axis can't), and on one of those a shape is positioned on the
-        # underlying 0..n-1 scale -- passing the label string, as this did at
-        # first, drew nothing at all. Annotations are the exception: they do
-        # accept the label, which is why the S1/S2/S3 markers showed up while
-        # the lines and the band didn't.
-        fig_telemetry.add_vrect(
-            x0=edge_index[1], x1=edge_index[2],
-            fillcolor="rgba(255,255,255,0.05)", line_width=0, layer="below",
-            row="all", col=1, exclude_empty_subplots=False,
-        )
-        # exclude_empty_subplots=False on both: with row="all", Plotly skips
-        # every subplot that has no trace yet, and the driver traces are only
-        # added further down -- so by default the band and both lines were
-        # silently dropped from all five panels.
+        # underlying 0..n-1 scale -- passing the label string drew nothing at
+        # all. Annotations are the exception: they do accept the label, which
+        # is why the S1/S2/S3 markers showed up while the lines didn't.
+        # exclude_empty_subplots=False: with row="all", Plotly skips every
+        # subplot that has no trace yet, and the driver traces are only added
+        # further down -- by default the lines were silently dropped from all
+        # five panels.
         for idx in edge_index[1:3]:
             fig_telemetry.add_vline(
-                x=idx, line_dash="dot",
-                line_color="rgba(255,255,255,0.5)", line_width=1.5,
+                x=idx, line_color="rgba(255,255,255,0.25)", line_width=1,
                 row="all", col=1, exclude_empty_subplots=False,
             )
         # The labels sit *inside* the top of the speed panel, not above it: at
