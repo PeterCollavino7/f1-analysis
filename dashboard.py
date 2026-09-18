@@ -1927,7 +1927,7 @@ def picker_key(name):
     return f"pick_drivers_{name}_{session_slug()}"
 
 
-def driver_picker(name, label, help_text, eligible, on_pick=None):
+def driver_picker(name, label, help_text, eligible, on_pick=None, limit=MAX_DRIVERS, default=()):
     """A two-driver choice: one pill per driver, teammates side by side, each
     marked with its team color. Used by the Head-to-head tab and by the race
     pace comparison; `name` keeps their selections apart, `eligible` is who
@@ -1962,14 +1962,21 @@ def driver_picker(name, label, help_text, eligible, on_pick=None):
         current = st.session_state.get(key) or []
         previous = st.session_state.get(history_key, [])
         ordered = [d for d in previous if d in current] + [d for d in current if d not in previous]
-        ordered = ordered[-MAX_DRIVERS:]
+        ordered = ordered[-limit:]
         st.session_state[key] = ordered
         st.session_state[history_key] = ordered
         if on_pick:
             on_pick()
 
+    # A starting selection goes in through session state, not the widget's
+    # default=: the callback above writes st.session_state[key], and a widget
+    # given both a default and a state-set value warns on screen.
+    if key not in st.session_state:
+        initial = [d for d in default if d in order][-limit:]
+        st.session_state[key] = initial
+        st.session_state[history_key] = initial
     st.pills(
-        label, options=order, selection_mode="multi", default=[], key=key,
+        label, options=order, selection_mode="multi", key=key,
         on_change=keep_newest_two, help=help_text,
     )
     selected = [d for d in st.session_state.get(history_key, []) if d in order]
@@ -2733,24 +2740,38 @@ def render_pace_tab():
     # strategies get laid on top of each other out of sequence).
     h2h_laps = session.laps.dropna(subset=["LapTime", "LapNumber"])
     if not h2h_laps.empty and h2h_laps["Driver"].nunique() >= 2:
-        # The panel is drawn whether or not two drivers are picked, with the
-        # picker inside it: the picker is this chart's input, not a separate
-        # widget above it. Its title needs the pair before the picker is drawn,
-        # so they're read from the order the picker keeps in session state.
+        # Opens on the winner against the runner-up, so the chart is there
+        # from the start rather than behind a choice; the pills live in a
+        # popover inside the panel and close themselves on each pick (a new
+        # driver replaces the older of the two). The title needs the pair
+        # before the picker is drawn, so it's read from the order the picker
+        # keeps in session state, falling back to that same default pair.
         h2h_eligible = h2h_laps["Driver"].unique()
-        picked = [d for d in st.session_state.get(picker_key("pace") + "_order", []) if d in h2h_eligible]
+        default_pair = order_by_classification(session, h2h_eligible)[:2]
+        picked = [
+            d for d in st.session_state.get(picker_key("pace") + "_order", default_pair) if d in h2h_eligible
+        ]
         with chart_panel(
             "Race pace head-to-head" + (f" · {picked[0]} vs {picked[1]}" if len(picked) == 2 else ""),
             "Every lap, with the compound it was run on · lap 1, pit laps and "
             "laps off the scale dropped, safety-car laps shaded",
             accent=build_driver_styles(picked, session)[picked[0]][0] if picked else PALETTE["blue"],
         ):
-            h2h_drivers = driver_picker(
-                "pace", "Drivers",
-                "The first driver you pick is the one the gap is measured from. "
-                "Picking a third replaces the older of the two.",
-                h2h_eligible,
-            )
+            pace_popover = f"popover_pace_{session_slug()}"
+
+            def close_pace_popover():
+                st.session_state[pace_popover] = False
+
+            with st.popover(
+                "Change drivers" if len(picked) == 2 else "Pick drivers",
+                icon=":material/group:", key=pace_popover, on_change="rerun",
+            ):
+                h2h_drivers = driver_picker(
+                    "pace", "Drivers",
+                    "The first driver is the one the gap is measured from. "
+                    "Picking a new one replaces the older of the two.",
+                    h2h_eligible, on_pick=close_pace_popover, default=default_pair,
+                )
             if len(h2h_drivers) < 2:
                 empty_state("Pick two drivers to see their pace lap by lap", "prompt")
             else:
@@ -3176,13 +3197,13 @@ def render_pace_tab():
             "Fuel-corrected · dotted lines are the fitted degradation trend per compound",
             accent=COMPOUND_COLORS["SOFT"],
         ):
-            laps_label = "Individual laps" + (f" · {' & '.join(pace_drivers)}" if pace_drivers else "")
+            laps_label = "Individual laps" + (f" · {pace_drivers[0]}" if pace_drivers else "")
             # Keyed and stateful so the pick can close it: every pick is a
             # finished choice here, and the chart it changes is right under
             # the popover, so the popover gets out of the way at once instead
-            # of waiting for a click outside it. Two drivers at most -- the
-            # laps are colored by compound, not driver, so a third made two
-            # people's Hard stints indistinguishable.
+            # of waiting for a click outside it. One driver, as the name
+            # says: the laps are colored by compound, not driver, so with two
+            # their Hard stints were indistinguishable anyway.
             laps_popover = f"popover_laps_{session_slug()}"
 
             def close_laps_popover():
@@ -3192,9 +3213,9 @@ def render_pace_tab():
                 driver_picker(
                     "laps", "Show each lap for",
                     "Every lap of the chosen drivers' stints, fuel-corrected like the trend lines, "
-                    "plotted under them. Up to two drivers; a third replaces the older one, and "
-                    "clicking a driver again removes them.",
-                    pace_driver_options, on_pick=close_laps_popover,
+                    "plotted under them. One driver at a time: picking another replaces them, "
+                    "and clicking the same one again clears the chart.",
+                    pace_driver_options, on_pick=close_laps_popover, limit=1,
                 )
             st.plotly_chart(fig_pace, width="stretch", config=PLOTLY_CONFIG)
 
