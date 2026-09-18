@@ -484,9 +484,12 @@ st.markdown(
         background: var(--pill, #999999);
         box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
     }
+    /* Titillium, the app's display face, rather than the mono used for
+       timing figures: bold mono made three-letter codes read like terminal
+       output, and these are names, not numbers. */
     [class*="st-key-drivers_"] button[data-variant] p {
-        font-family: var(--mono); font-size: 0.8rem; font-weight: 600;
-        letter-spacing: 0.04em; color: var(--ink-dim);
+        font-family: var(--display); font-size: 0.86rem; font-weight: 600;
+        letter-spacing: 0.07em; line-height: 1; color: var(--ink-dim);
     }
     [class*="st-key-drivers_"] button[data-variant]:hover {
         border-color: var(--pill, #999999) !important;
@@ -499,7 +502,7 @@ st.markdown(
         background: color-mix(in srgb, var(--pill) 26%, transparent) !important;
         box-shadow: 0 0 14px -4px var(--pill);
     }
-    [class*="st-key-drivers_"] button[aria-pressed="true"] p { color: #ffffff; }
+    [class*="st-key-drivers_"] button[aria-pressed="true"] p { color: #ffffff; font-weight: 700; }
     @media (prefers-reduced-motion: reduce) {
         [class*="st-key-drivers_"] button[data-variant] { transition: none; }
         [class*="st-key-drivers_"] button[data-variant]:active { transform: none; }
@@ -1863,9 +1866,11 @@ st.sidebar.markdown(
 
 # ------------------------------------------------------------- telemetry --
 
-def driver_picker():
-    """The head-to-head driver choice: one pill per driver, teammates side by
-    side, each marked with its team color. Replaced a multiselect dropdown,
+def driver_picker(name, label, help_text, eligible):
+    """A two-driver choice: one pill per driver, teammates side by side, each
+    marked with its team color. Used by the Head-to-head tab and by the race
+    pace comparison; `name` keeps their selections apart, `eligible` is who
+    can be picked there. Replaced a multiselect dropdown,
     which took an open-scroll-pick-reopen round per driver, offered a "Select
     all" that made no sense with a limit of two, and simply refused a third
     pick. Here every driver is in view, one click toggles, and a third pick
@@ -1876,7 +1881,7 @@ def driver_picker():
     than carrying over drivers the new session may not even have.
     """
     results = session.results.sort_values("Position")
-    with_laps = set(session.laps["Driver"].unique())
+    with_laps = set(eligible)
     # Teams in order of their best finisher, teammates adjacent.
     teams = list(dict.fromkeys(results["TeamName"]))
     order = [
@@ -1885,7 +1890,8 @@ def driver_picker():
     ]
     order += sorted(with_laps - set(order))  # anyone the results don't list
 
-    key = "drivers_" + re.sub(r"\W+", "_", f"{year}_{event_name}_{session_name}")
+    # The "drivers_" prefix is what the pill stylesheet matches on.
+    key = f"drivers_{name}_" + re.sub(r"\W+", "_", f"{year}_{event_name}_{session_name}")
     history_key = key + "_order"
 
     def keep_newest_two():
@@ -1901,8 +1907,8 @@ def driver_picker():
         st.session_state[history_key] = ordered
 
     st.pills(
-        "Drivers · pick two to compare, a third replaces the first",
-        options=order, selection_mode="multi", default=[], key=key, on_change=keep_newest_two,
+        label, options=order, selection_mode="multi", default=[], key=key,
+        on_change=keep_newest_two, help=help_text,
     )
     selected = [d for d in st.session_state.get(history_key, []) if d in order]
 
@@ -1926,7 +1932,11 @@ def render_telemetry_tab():
     sibling tabs down with it, since Streamlit runs the whole script
     top to bottom on every rerun whatever tab is on screen.
     """
-    selected_drivers = driver_picker()
+    selected_drivers = driver_picker(
+        "telemetry", "Choose two drivers to compare",
+        "The first driver you pick is the reference lap. Picking a third replaces the older of the two.",
+        session.laps["Driver"].unique(),
+    )
     # st.segmented_control rather than a radio: this is a two-way toggle
     # between unit systems, not a list of choices, and the segmented
     # control renders it as one -- it can also return None (nothing
@@ -2665,10 +2675,11 @@ def render_pace_tab():
     # strategies get laid on top of each other out of sequence).
     h2h_laps = session.laps.dropna(subset=["LapTime", "LapNumber"])
     if not h2h_laps.empty and h2h_laps["Driver"].nunique() >= 2:
-        h2h_options = order_by_classification(session, h2h_laps["Driver"].unique())
-        h2h_drivers = st.multiselect(
-            "Compare race pace", options=h2h_options, default=h2h_options[:2],
-            max_selections=2, key="pace_h2h",
+        h2h_drivers = driver_picker(
+            "pace", "Compare race pace",
+            "The first driver you pick is the one the gap is measured from. "
+            "Picking a third replaces the older of the two.",
+            h2h_laps["Driver"].unique(),
         )
         if len(h2h_drivers) < 2:
             st.info("Pick two drivers to compare their race pace lap by lap.")
