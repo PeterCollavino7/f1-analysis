@@ -2216,6 +2216,18 @@ def render_telemetry_tab():
     fig_telemetry.update_yaxes(gridcolor="rgba(255,255,255,0.08)")
     fig_telemetry.update_xaxes(title_text=dist_title, row=5, col=1)
     fig_telemetry.update_yaxes(title_text=speed_unit, row=1, col=1)
+    # Headroom above the top speed: the S1/S2/S3 labels sit inside the top of
+    # this panel, and on autorange the fastest stretch of the lap ran straight
+    # through them. Room is made in the axis rather than the labels moved up,
+    # because above the plot area S2 lands on the centred "Speed" title.
+    all_speeds = np.concatenate(
+        [np.asarray(resampled[d]["Speed"], dtype=float) for d in selected_drivers]
+    ) * (KM_TO_MI if imperial else 1)
+    speed_lo, speed_hi = np.nanmin(all_speeds), np.nanmax(all_speeds)
+    speed_span = speed_hi - speed_lo
+    fig_telemetry.update_yaxes(
+        range=[speed_lo - 0.05 * speed_span, speed_hi + 0.2 * speed_span], row=1, col=1,
+    )
     fig_telemetry.update_yaxes(title_text="s", row=2, col=1)
     fig_telemetry.update_yaxes(title_text="%", row=3, col=1)
     fig_telemetry.update_yaxes(tickvals=[0, 1], ticktext=["Off", "On"], range=[-0.15, 1.15], row=4, col=1)
