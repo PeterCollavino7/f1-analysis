@@ -5,6 +5,7 @@ degradation, for any past race weekend and any of its actual sessions.
 Run with: venv\\Scripts\\streamlit run dashboard.py
 """
 import datetime
+import logging
 import os
 import re
 import urllib.parse
@@ -886,13 +887,27 @@ def available_years():
 @st.cache_data(ttl=6 * 3600, max_entries=3, show_spinner="Loading timing and telemetry for this session...")
 def load_session(year, event, session_name, telemetry=True):
     session = fastf1.get_session(year, event, session_name)
-    session.load(telemetry=telemetry, weather=telemetry)
     # load() doesn't raise when the timing feed fails -- it logs, returns, and
     # leaves session.laps unset, so the first chart to touch the laps crashed
-    # with a raw traceback. Touching them here instead turns that into the
-    # plain error message below, and since st.cache_data never caches an
-    # exception, the next visit tries the download again.
-    session.laps
+    # with a raw traceback. The laps are touched here instead, which turns
+    # that into the plain error message below (and st.cache_data never caches
+    # an exception, so the next visit tries the download again). What FastF1
+    # logged along the way is kept and attached, since the real cause is only
+    # ever in the log, never in the exception.
+    problems = []
+    handler = logging.Handler(level=logging.WARNING)
+    handler.emit = lambda record: problems.append(record.getMessage())
+    fastf1_logger = logging.getLogger("fastf1")
+    fastf1_logger.addHandler(handler)
+    try:
+        session.load(telemetry=telemetry, weather=telemetry)
+    finally:
+        fastf1_logger.removeHandler(handler)
+    try:
+        session.laps
+    except fastf1.core.DataNotLoadedError:
+        failures = [m for m in problems if "fail" in m.lower() or "error" in m.lower()]
+        raise RuntimeError("the lap timing data didn't download. " + " | ".join((failures or problems)[:3]))
     return session
 
 
