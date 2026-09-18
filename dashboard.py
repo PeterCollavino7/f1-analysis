@@ -896,7 +896,9 @@ def load_session(year, event, session_name, telemetry=True):
     # ever in the log, never in the exception.
     problems = []
     handler = logging.Handler(level=logging.WARNING)
-    handler.emit = lambda record: problems.append(record.getMessage())
+    handler.emit = lambda record: problems.append(
+        record.getMessage() + (f" ({record.exc_info[1]!r})"[:300] if record.exc_info else "")
+    )
     fastf1_logger = logging.getLogger("fastf1")
     fastf1_logger.addHandler(handler)
     try:
