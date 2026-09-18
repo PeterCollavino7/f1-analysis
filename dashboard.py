@@ -465,12 +465,13 @@ st.markdown(
     .stat-card .sub b { color: var(--card-accent, var(--ink)); font-weight: 700; }
 
     /* ------------------------------------------------------ driver pills */
-    /* The head-to-head picker (driver_picker). Each pill's --pill color is
-       set per button, in option order, by a small rule block the picker
-       writes itself; everything else lives here. Selected is read from
-       aria-pressed, which react-aria sets on the button. */
-    [class*="st-key-drivers_"] [role="toolbar"] { gap: 6px; }
-    [class*="st-key-drivers_"] button[data-variant] {
+    /* Every pill picker whose key starts with "pick_" (driver_picker, the
+       compound choice). Each pill's --pill color is set per button, in option
+       order, by pill_colors(); everything else lives here. Selected is read
+       from aria-pressed (multi-select pills) or aria-checked (single-select,
+       which react-aria renders as a radio group). */
+    [class*="st-key-pick_"] [role="toolbar"] { gap: 6px; }
+    [class*="st-key-pick_"] button[data-variant] {
         display: inline-flex; align-items: center;
         min-height: 0; padding: 5px 13px 5px 10px;
         border-radius: 999px !important;
@@ -478,7 +479,7 @@ st.markdown(
         border: 1px solid var(--line-strong) !important;
         transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.08s ease;
     }
-    [class*="st-key-drivers_"] button[data-variant]::before {
+    [class*="st-key-pick_"] button[data-variant]::before {
         content: ""; flex: none;
         width: 8px; height: 8px; margin-right: 8px; border-radius: 50%;
         background: var(--pill, #999999);
@@ -487,25 +488,45 @@ st.markdown(
     /* Titillium, the app's display face, rather than the mono used for
        timing figures: bold mono made three-letter codes read like terminal
        output, and these are names, not numbers. */
-    [class*="st-key-drivers_"] button[data-variant] p {
+    [class*="st-key-pick_"] button[data-variant] p {
         font-family: var(--display); font-size: 0.86rem; font-weight: 600;
         letter-spacing: 0.07em; line-height: 1; color: var(--ink-dim);
     }
-    [class*="st-key-drivers_"] button[data-variant]:hover {
+    [class*="st-key-pick_"] button[data-variant]:hover {
         border-color: var(--pill, #999999) !important;
         background: color-mix(in srgb, var(--pill, #999999) 10%, transparent) !important;
     }
-    [class*="st-key-drivers_"] button[data-variant]:hover p { color: var(--ink); }
-    [class*="st-key-drivers_"] button[data-variant]:active { transform: scale(0.96); }
-    [class*="st-key-drivers_"] button[aria-pressed="true"] {
+    [class*="st-key-pick_"] button[data-variant]:hover p { color: var(--ink); }
+    [class*="st-key-pick_"] button[data-variant]:active { transform: scale(0.96); }
+    [class*="st-key-pick_"] button:is([aria-pressed="true"], [aria-checked="true"]) {
         border-color: var(--pill) !important;
         background: color-mix(in srgb, var(--pill) 26%, transparent) !important;
         box-shadow: 0 0 14px -4px var(--pill);
     }
-    [class*="st-key-drivers_"] button[aria-pressed="true"] p { color: #ffffff; font-weight: 700; }
+    [class*="st-key-pick_"] button:is([aria-pressed="true"], [aria-checked="true"]) p { color: #ffffff; font-weight: 700; }
     @media (prefers-reduced-motion: reduce) {
-        [class*="st-key-drivers_"] button[data-variant] { transition: none; }
-        [class*="st-key-drivers_"] button[data-variant]:active { transform: none; }
+        [class*="st-key-pick_"] button[data-variant] { transition: none; }
+        [class*="st-key-pick_"] button[data-variant]:active { transform: none; }
+    }
+
+    /* ------------------------------------------------------- empty states */
+    /* empty_state(): what a chart shows when there's nothing to draw. It
+       replaced Streamlit's st.info, whose saturated blue box was the loudest
+       thing on any page it appeared on -- for a message that is either "pick
+       something" or "no data here", neither of which should outshout the
+       charts. A prompt (the page is waiting on the reader) is a step
+       brighter and points up at the picker; plain "no data" recedes. */
+    .empty-state {
+        display: flex; align-items: center; justify-content: center; gap: 0.6rem;
+        padding: 1.5rem 1rem; margin: 0.25rem 0 0.5rem;
+        border: 1px dashed var(--line-strong); border-radius: 12px;
+        color: var(--ink-faint); font-size: 0.92rem; text-align: center;
+    }
+    .empty-state svg { flex: none; width: 17px; height: 17px; opacity: 0.8; }
+    .empty-state.prompt { color: var(--ink-dim); border-color: rgba(255, 255, 255, 0.2); }
+    .empty-state.note {
+        justify-content: flex-start; padding: 0.55rem 0.9rem; border-style: solid;
+        border-color: rgba(255, 179, 64, 0.25); color: rgba(255, 179, 64, 0.85); font-size: 0.86rem;
     }
 
     /* ------------------------------------------------------- driver cards */
@@ -1866,13 +1887,47 @@ st.sidebar.markdown(
 
 # ------------------------------------------------------------- telemetry --
 
+EMPTY_ICONS = {
+    # Arrow up to the picker above; a dashed circle for "nothing here"; a
+    # small warning mark for a partial result.
+    "prompt": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+              'stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>',
+    "empty": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+             'stroke-dasharray="3 3"><circle cx="12" cy="12" r="9"/></svg>',
+    "note": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+            'stroke-linecap="round"><path d="M12 8v5M12 16.5v.5"/><circle cx="12" cy="12" r="9"/></svg>',
+}
+
+
+def empty_state(text, kind="empty"):
+    """What a chart shows when there is nothing to draw -- see the .empty-state
+    styles. kind: "prompt" (waiting on a choice above), "empty" (no data for
+    this session), "note" (a partial result worth flagging). Real failures
+    stay on st.error: those should stand out."""
+    st.markdown(
+        f'<div class="empty-state {kind}">{EMPTY_ICONS[kind]}<span>{text}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def pill_colors(key, colors):
+    """Give each pill of a "pick_" picker its own --pill color, by position:
+    the buttons carry no value attribute to match on, only their order."""
+    rules = [f".st-key-{key} button:nth-of-type({i}) {{ --pill: {c}; }}" for i, c in enumerate(colors, start=1)]
+    st.markdown("<style>" + "\n".join(rules) + "</style>", unsafe_allow_html=True)
+
+
+def session_slug():
+    return re.sub(r"\W+", "_", f"{year}_{event_name}_{session_name}")
+
+
 def picker_key(name):
-    # The "drivers_" prefix is what the pill stylesheet matches on; the
-    # session in the key makes a new race or session start from nothing.
-    return f"drivers_{name}_" + re.sub(r"\W+", "_", f"{year}_{event_name}_{session_name}")
+    # The "pick_" prefix is what the pill stylesheet matches on; the session
+    # in the key makes a new race or session start from nothing.
+    return f"pick_drivers_{name}_{session_slug()}"
 
 
-def driver_picker(name, label, help_text, eligible, limit=MAX_DRIVERS):
+def driver_picker(name, label, help_text, eligible, on_pick=None):
     """A two-driver choice: one pill per driver, teammates side by side, each
     marked with its team color. Used by the Head-to-head tab and by the race
     pace comparison; `name` keeps their selections apart, `eligible` is who
@@ -1910,25 +1965,20 @@ def driver_picker(name, label, help_text, eligible, limit=MAX_DRIVERS):
         ordered = ordered[-MAX_DRIVERS:]
         st.session_state[key] = ordered
         st.session_state[history_key] = ordered
+        if on_pick:
+            on_pick()
 
     st.pills(
         label, options=order, selection_mode="multi", default=[], key=key,
-        on_change=keep_newest_two if limit else None, help=help_text,
+        on_change=keep_newest_two, help=help_text,
     )
-    if limit:
-        selected = [d for d in st.session_state.get(history_key, []) if d in order]
-    else:
-        selected = [d for d in (st.session_state.get(key) or []) if d in order]
+    selected = [d for d in st.session_state.get(history_key, []) if d in order]
 
     # Team color per pill, via nth-of-type on the buttons in option order.
     # A selected pill takes the color its line will have on the charts, which
     # for the second driver of a team is white (see build_driver_styles).
     line_color = {d: c for d, (c, _) in build_driver_styles(selected, session).items()}
-    rules = []
-    for i, driver in enumerate(order, start=1):
-        color = line_color.get(driver) or safe_driver_color(driver, session)
-        rules.append(f".st-key-{key} button:nth-of-type({i}) {{ --pill: {color}; }}")
-    st.markdown("<style>" + "\n".join(rules) + "</style>", unsafe_allow_html=True)
+    pill_colors(key, [line_color.get(d) or safe_driver_color(d, session) for d in order])
     return selected
 
 
@@ -1957,7 +2007,7 @@ def render_telemetry_tab():
     dist_unit = "ft" if imperial else "m"
 
     if not selected_drivers:
-        st.info("Choose one or two drivers above to compare their fastest laps.")
+        empty_state("Choose one or two drivers above to compare their fastest laps", "prompt")
         return
 
     # pick_fastest() returns None for a driver with no timed lap at all --
@@ -1972,10 +2022,10 @@ def render_telemetry_tab():
             laps_by_driver[driver] = lap
     missing = [d for d in selected_drivers if d not in laps_by_driver]
     if missing:
-        st.warning(f"No timed lap for {', '.join(missing)} in this session -- left out.")
+        empty_state(f"No timed lap for {', '.join(missing)} in this session, so left out", "note")
     selected_drivers = [d for d in selected_drivers if d in laps_by_driver]
     if not selected_drivers:
-        st.info("None of the selected drivers set a timed lap in this session.")
+        empty_state("None of the selected drivers set a timed lap in this session")
         return
 
     telemetry_by_driver = {d: lap.get_car_data().add_distance() for d, lap in laps_by_driver.items()}
@@ -2119,7 +2169,7 @@ def render_telemetry_tab():
         }
 
     if len(selected_drivers) < 2:
-        st.info("Select at least 2 drivers to see the dominance map.")
+        empty_state("Pick a second driver to see where on the lap each one is faster", "prompt")
     else:
         dom_a, dom_b = selected_drivers[0], selected_drivers[1]
 
@@ -2550,7 +2600,7 @@ def render_quali_stats():
         laps = laps[laps["Deleted"] != True]  # noqa: E712 -- the column holds NaN too
     timed = laps.dropna(subset=["LapTime"])
     if timed.empty:
-        st.info("No timed laps in this session.")
+        empty_state("No timed laps in this session")
         return
     best = timed.groupby("Driver")["LapTime"].min().dt.total_seconds().sort_values()
     order = list(reversed(best.index))  # fastest at the top of a horizontal bar chart
@@ -2612,7 +2662,7 @@ def render_quali_stats():
 def render_pace_tab():
     strategy_laps = session.laps.dropna(subset=["Stint", "Compound", "LapNumber"])
     if strategy_laps.empty:
-        st.info("No stint data available for a strategy timeline in this session.")
+        empty_state("No stint data available for a strategy timeline in this session")
     else:
         strategy_order = order_by_classification(session, strategy_laps["Driver"].unique())
 
@@ -2683,23 +2733,29 @@ def render_pace_tab():
     # strategies get laid on top of each other out of sequence).
     h2h_laps = session.laps.dropna(subset=["LapTime", "LapNumber"])
     if not h2h_laps.empty and h2h_laps["Driver"].nunique() >= 2:
-        h2h_drivers = driver_picker(
-            "pace", "Compare race pace",
-            "The first driver you pick is the one the gap is measured from. "
-            "Picking a third replaces the older of the two.",
-            h2h_laps["Driver"].unique(),
-        )
-        if len(h2h_drivers) < 2:
-            st.info("Pick two drivers to compare their race pace lap by lap.")
-        else:
-            first_driver, second_driver = h2h_drivers
-            h2h_styles = build_driver_styles([first_driver, second_driver], session)
-            with chart_panel(
-                f"Race pace head-to-head · {first_driver} vs {second_driver}",
-                "Every lap, with the compound it was run on · lap 1, pit laps and "
-                "laps off the scale dropped, safety-car laps shaded",
-                accent=h2h_styles[first_driver][0],
-            ):
+        # The panel is drawn whether or not two drivers are picked, with the
+        # picker inside it: the picker is this chart's input, not a separate
+        # widget above it. Its title needs the pair before the picker is drawn,
+        # so they're read from the order the picker keeps in session state.
+        h2h_eligible = h2h_laps["Driver"].unique()
+        picked = [d for d in st.session_state.get(picker_key("pace") + "_order", []) if d in h2h_eligible]
+        with chart_panel(
+            "Race pace head-to-head" + (f" · {picked[0]} vs {picked[1]}" if len(picked) == 2 else ""),
+            "Every lap, with the compound it was run on · lap 1, pit laps and "
+            "laps off the scale dropped, safety-car laps shaded",
+            accent=build_driver_styles(picked, session)[picked[0]][0] if picked else PALETTE["blue"],
+        ):
+            h2h_drivers = driver_picker(
+                "pace", "Drivers",
+                "The first driver you pick is the one the gap is measured from. "
+                "Picking a third replaces the older of the two.",
+                h2h_eligible,
+            )
+            if len(h2h_drivers) < 2:
+                empty_state("Pick two drivers to see their pace lap by lap", "prompt")
+            else:
+                first_driver, second_driver = h2h_drivers
+                h2h_styles = build_driver_styles([first_driver, second_driver], session)
                 fig_h2h = make_subplots(
                     rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.09,
                     row_heights=[1.0, 0.5],
@@ -2869,7 +2925,7 @@ def render_pace_tab():
 
     overtake_laps = session.laps.dropna(subset=["Position", "LapNumber"])
     if overtake_laps.empty:
-        st.info("No lap-by-lap position data available to count overtakes in this session.")
+        empty_state("No lap-by-lap position data available to count overtakes in this session")
     else:
         method_note(
             "On-track position gains, lap over lap, with a gain credited only for what's left "
@@ -2890,7 +2946,7 @@ def render_pace_tab():
         ranked_overtakes = sorted(overtake_counts.items(), key=lambda kv: kv[1], reverse=True)
         ranked_overtakes = [(d, c) for d, c in ranked_overtakes if c > 0]
         if not ranked_overtakes:
-            st.info("No on-track position gains detected in this session.")
+            empty_state("No on-track position gains detected in this session")
         else:
             overtake_styles = build_driver_styles([d for d, _ in ranked_overtakes], session)
             with chart_panel(
@@ -2980,9 +3036,9 @@ def render_pace_tab():
     ]
 
     if not compounds_with_data:
-        st.info(
+        empty_state(
             "Not enough green-flag laps on one compound in this session to fit a degradation "
-            "trend (typical for Qualifying, where laps are single push laps rather than a run)."
+            "trend (typical for Qualifying, where laps are single push laps rather than a run)"
         )
     else:
         method_note(
@@ -3004,7 +3060,7 @@ def render_pace_tab():
         # from session state -- a widget's new value is already there when
         # the rerun it triggered starts.
         pace_drivers = [
-            d for d in (st.session_state.get(picker_key("laps")) or []) if d in pace_driver_options
+            d for d in st.session_state.get(picker_key("laps") + "_order", []) if d in pace_driver_options
         ]
 
         fig_pace = base_figure("", "Lap time (s), fuel-corrected", "Tyre life (laps)")
@@ -3034,7 +3090,7 @@ def render_pace_tab():
             try:
                 (tyre_coef, fuel_coef, intercept), *_ = np.linalg.lstsq(design, lap_time, rcond=None)
             except np.linalg.LinAlgError:
-                st.warning(f"Couldn't fit a degradation trend for {compound.title()} (bad/degenerate data).")
+                empty_state(f"Couldn't fit a degradation trend for {compound.title()} (bad or degenerate data)", "note")
                 continue
             fits[compound] = {
                 "tyre": tyre_coef, "fuel": fuel_coef, "intercept": intercept,
@@ -3120,21 +3176,39 @@ def render_pace_tab():
             "Fuel-corrected · dotted lines are the fitted degradation trend per compound",
             accent=COMPOUND_COLORS["SOFT"],
         ):
-            laps_label = "Individual laps" + (f" · {', '.join(pace_drivers)}" if pace_drivers else "")
-            with st.popover(laps_label, icon=":material/person_search:"):
+            laps_label = "Individual laps" + (f" · {' & '.join(pace_drivers)}" if pace_drivers else "")
+            # Keyed and stateful so the pick can close it: every pick is a
+            # finished choice here, and the chart it changes is right under
+            # the popover, so the popover gets out of the way at once instead
+            # of waiting for a click outside it. Two drivers at most -- the
+            # laps are colored by compound, not driver, so a third made two
+            # people's Hard stints indistinguishable.
+            laps_popover = f"popover_laps_{session_slug()}"
+
+            def close_laps_popover():
+                st.session_state[laps_popover] = False
+
+            with st.popover(laps_label, icon=":material/person_search:", key=laps_popover, on_change="rerun"):
                 driver_picker(
                     "laps", "Show each lap for",
                     "Every lap of the chosen drivers' stints, fuel-corrected like the trend lines, "
-                    "plotted under them. Pick as many as you like; click a driver again to remove them.",
-                    pace_driver_options, limit=None,
+                    "plotted under them. Up to two drivers; a third replaces the older one, and "
+                    "clicking a driver again removes them.",
+                    pace_driver_options, on_pick=close_laps_popover,
                 )
             st.plotly_chart(fig_pace, width="stretch", config=PLOTLY_CONFIG)
 
         if not coeffs:
-            st.info("No compound had a usable degradation fit in this session.")
+            empty_state("No compound had a usable degradation fit in this session")
             return
 
-        compound_choice = st.selectbox("Compound (per-driver breakdown)", options=list(coeffs.keys()))
+        # The compound is chosen with pills inside the chart's own panel (see
+        # below), so it's read from session state here, before they're drawn.
+        compound_options = list(coeffs.keys())
+        compound_key = f"pick_compound_{session_slug()}"
+        compound_choice = st.session_state.get(compound_key)
+        if compound_choice not in compound_options:
+            compound_choice = compound_options[0]
         compound_laps = pace_laps[pace_laps["Compound"] == compound_choice]
         fuel_coef = coeffs[compound_choice][1]
 
@@ -3156,15 +3230,20 @@ def render_pace_tab():
                 continue
             driver_slopes[driver] = tyre_coef
 
-        if not driver_slopes:
-            st.info(f"No driver ran enough laps on {compound_choice.title()} for a per-driver estimate.")
-        else:
-            ranked = sorted(driver_slopes.items(), key=lambda kv: kv[1])
-            with chart_panel(
-                f"{compound_choice.title()} — degradation by driver",
-                "Lower is better · a negative slope means the car got quicker as the stint went on",
-                accent=COMPOUND_COLORS.get(compound_choice, "#999999"),
-            ):
+        with chart_panel(
+            f"{compound_choice.title()} — degradation by driver",
+            "Lower is better · a negative slope means the car got quicker as the stint went on",
+            accent=COMPOUND_COLORS.get(compound_choice, "#999999"),
+        ):
+            st.pills(
+                "Compound", compound_options, selection_mode="single", default=compound_choice,
+                required=True, format_func=str.title, key=compound_key,
+            )
+            pill_colors(compound_key, [COMPOUND_COLORS.get(c, "#999999") for c in compound_options])
+            if not driver_slopes:
+                empty_state(f"No driver ran enough laps on {compound_choice.title()} for a per-driver estimate")
+            else:
+                ranked = sorted(driver_slopes.items(), key=lambda kv: kv[1])
                 fig_drivers = base_figure("", "", "Fuel-corrected degradation (s/lap)")
                 fig_drivers.add_vline(x=0, line_color="rgba(255,255,255,0.35)", line_width=1)
                 # Driver colors rather than one flat compound color: this chart
@@ -3204,7 +3283,7 @@ if section == SECTION_WEEKEND:
             st.write("")
             poles = pole_positions(year, tuple(schedule["EventName"].tolist()))
             if poles.empty:
-                st.info("No completed qualifying sessions to count poles from yet.")
+                empty_state("No completed qualifying sessions to count poles from yet")
             else:
                 col_poles_driver, col_poles_engine = st.columns(2)
 
@@ -3804,7 +3883,7 @@ if section == SECTION_SEASON:
                         driver_color(names[0]),
                     )])
                 else:
-                    st.info("Need at least 2 drivers with points to estimate this.")
+                    empty_state("Need at least 2 drivers with points to estimate this")
 
             with col_clinch_constructors:
                 if len(top3_constructors) >= 2:
@@ -3821,7 +3900,7 @@ if section == SECTION_SEASON:
                         team_color(names_c[0]),
                     )])
                 else:
-                    st.info("Need at least 2 constructors with points to estimate this.")
+                    empty_state("Need at least 2 constructors with points to estimate this")
 
 # ----------------------------------------------------------- season stats --
 
@@ -3837,7 +3916,7 @@ if section == SECTION_SEASON:
         stats_df, driver_overtakes = season_stats(year, tuple(schedule["EventName"].tolist()))
 
         if stats_df.empty:
-            st.info("No completed races to compute stats from yet.")
+            empty_state("No completed races to compute stats from yet")
         else:
             most_ot = stats_df.loc[stats_df["Overtakes"].idxmax()]
             fewest_ot = stats_df.loc[stats_df["Overtakes"].idxmin()]
@@ -3982,7 +4061,7 @@ if section == SECTION_SEASON:
             ranked_driver_overtakes = sorted(driver_overtakes.items(), key=lambda kv: kv[1], reverse=True)
             ranked_driver_overtakes = [(d, c) for d, c in ranked_driver_overtakes if c > 0]
             if not ranked_driver_overtakes:
-                st.info("No on-track position gains detected across this season's races yet.")
+                empty_state("No on-track position gains detected across this season's races yet")
             else:
                 with chart_panel(
                     "Overtakes by driver",
