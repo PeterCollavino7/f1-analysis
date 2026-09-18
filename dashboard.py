@@ -10,6 +10,18 @@ import re
 import urllib.parse
 from contextlib import contextmanager
 
+import streamlit as st
+
+st.set_page_config(page_title="F1 Dashboard", layout="wide", initial_sidebar_state="expanded")
+# Streamlit's top-right "running" icon (a boxed bike/runner glyph) reads as a
+# stray UI element against this page's own dark theme -- hidden rather than
+# restyled, since which icon it is isn't under our control, only whether it
+# shows at all. This one rule is sent before the heavy imports below, not with
+# the main stylesheet: the icon appears the moment a run starts, and on the
+# hosted app importing fastf1/pandas/plotly takes long enough that it sat
+# there, visible, on every page open until the stylesheet finally arrived.
+st.markdown('<style>[data-testid="stStatusWidget"] { display: none; }</style>', unsafe_allow_html=True)
+
 import fastf1
 import fastf1.plotting
 from fastf1.ergast import Ergast
@@ -17,15 +29,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import streamlit as st
 
 # FastF1 refuses to start on a cache directory that doesn't exist, and on a
 # fresh deploy (Streamlit Community Cloud) nothing has created it yet -- the
 # folder is gitignored, and the disk it lives on is wiped on every restart.
 os.makedirs("cache", exist_ok=True)
 fastf1.Cache.enable_cache("cache")
-
-st.set_page_config(page_title="F1 Dashboard", layout="wide", initial_sidebar_state="expanded")
 
 MAX_DRIVERS = 2
 CHART_HEIGHT = 360
@@ -166,18 +175,14 @@ st.markdown(
     .block-container { padding-top: 2.4rem; max-width: 1500px; }
     h1, h2, h3, h4 { font-family: var(--display); letter-spacing: -0.01em; }
 
-    /* Streamlit's default top-right "running" icon (a boxed bike/runner
-       glyph) reads as a stray UI element against this page's own dark
-       theme -- hidden rather than restyled, since which icon it is isn't
-       under our control, only whether it shows at all. */
-    [data-testid="stStatusWidget"] { display: none; }
     /* The stock header bar is an empty translucent strip above the hero: on a
        local run it holds no menu and no deploy button, and clearing its
        background lets the hero sit at the very top of the page. */
     [data-testid="stHeader"] { background: transparent; }
     /* The Deploy button is Streamlit Cloud's call to action; this app runs on
        a laptop and has nowhere to deploy to, so it's dead weight sitting over
-       the hero. Same reasoning as the status widget above -- and as there,
+       the hero. Same reasoning as the status widget (hidden at the top of
+       this file) -- and as there,
        only its visibility is touched, so a selector that stops matching costs
        a stray button, nothing more. The hamburger menu next to it stays:
        rerun, settings and "clear cache" are all genuinely useful here. */
@@ -882,6 +887,12 @@ def available_years():
 def load_session(year, event, session_name, telemetry=True):
     session = fastf1.get_session(year, event, session_name)
     session.load(telemetry=telemetry, weather=telemetry)
+    # load() doesn't raise when the timing feed fails -- it logs, returns, and
+    # leaves session.laps unset, so the first chart to touch the laps crashed
+    # with a raw traceback. Touching them here instead turns that into the
+    # plain error message below, and since st.cache_data never caches an
+    # exception, the next visit tries the download again.
+    session.laps
     return session
 
 
