@@ -5,6 +5,7 @@ degradation, for any past race weekend and any of its actual sessions.
 Run with: venv\\Scripts\\streamlit run dashboard.py
 """
 import datetime
+import os
 import re
 import urllib.parse
 from contextlib import contextmanager
@@ -18,6 +19,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+# FastF1 refuses to start on a cache directory that doesn't exist, and on a
+# fresh deploy (Streamlit Community Cloud) nothing has created it yet -- the
+# folder is gitignored, and the disk it lives on is wiped on every restart.
+os.makedirs("cache", exist_ok=True)
 fastf1.Cache.enable_cache("cache")
 
 st.set_page_config(page_title="F1 Dashboard", layout="wide", initial_sidebar_state="expanded")
@@ -92,8 +97,10 @@ DARK_LAYOUT = dict(
     colorway=["#5b8cff", "#2ee86e", "#ffb340", "#b57bff", "#ff5c8a", "#e10600"],
 )
 
-# FastF1's timing/telemetry data is only reliably complete from 2018 on.
-YEARS = list(range(2026, 2017, -1))
+# FastF1's timing/telemetry data is only reliably complete from 2018 on. The
+# top of the range follows the calendar rather than being written in, so a new
+# season shows up on its own -- see available_years() for when.
+FIRST_YEAR = 2018
 
 st.markdown(
     """
@@ -709,7 +716,10 @@ def event_name_for_round(year, round_number):
     return match.iloc[0]["EventName"] if len(match) else f"Round {round_number}"
 
 
-@st.cache_data(ttl=3600, show_spinner="Crunching stats across every race run so far this season...")
+# A day, not an hour: a newly finished race already changes event_names, and
+# with it the cache key, so a shorter ttl buys no freshness -- it only makes
+# some visitor wait for the whole season to be recomputed.
+@st.cache_data(ttl=86400, show_spinner="Crunching stats across every race run so far this season...")
 def season_stats(year, event_names):
     """One row per completed race: total overtakes (same rule as the
     per-race chart), retirements, the biggest grid-to-finish recovery, and
@@ -721,7 +731,11 @@ def season_stats(year, event_names):
     for event_name in event_names:
         try:
             race = fastf1.get_session(year, event_name, "Race")
-            race.load()
+            # Laps and race control messages are all count_overtakes() and the
+            # results columns read. Telemetry is most of a session's download
+            # and memory, and across a whole season it's what pushed this past
+            # the hosted app's ~1 GB.
+            race.load(telemetry=False, weather=False)
         except Exception:
             continue
         race_overtakes = count_overtakes(race)
@@ -750,15 +764,18 @@ def season_stats(year, event_names):
     return pd.DataFrame(rows), driver_overtakes
 
 
-# 2026's real, announced power unit lineup -- FastF1's results carry the
-# team, not the engine, and there's no supplier field to read this from.
-ENGINE_SUPPLIERS = {
+# Real power unit lineups, by season -- FastF1's results carry the team, not
+# the engine, and there's no supplier field to read this from. Only seasons
+# listed here get the "Poles by engine" chart: teams change suppliers between
+# years, so reusing one year's table for another would credit the wrong
+# manufacturer. A new season needs its own entry.
+ENGINE_SUPPLIERS = {2026: {
     "Mercedes": "Mercedes", "McLaren": "Mercedes", "Williams": "Mercedes", "Alpine": "Mercedes",
     "Ferrari": "Ferrari", "Haas F1 Team": "Ferrari", "Cadillac": "Ferrari",
     "Red Bull Racing": "Red Bull Ford", "Racing Bulls": "Red Bull Ford",
     "Aston Martin": "Honda",
     "Audi": "Audi",
-}
+}}
 
 
 @st.cache_data(ttl=3600, show_spinner="Checking who took pole in every qualifying session so far...")
@@ -841,10 +858,30 @@ def load_schedule(year):
     return schedule.sort_values("RoundNumber", ascending=False)
 
 
-@st.cache_data(show_spinner="Loading timing and telemetry for this session...")
-def load_session(year, event, session_name):
+def available_years():
+    """Seasons with at least one completed round, newest first. The current
+    year only joins the list once its first race is over: between New Year and
+    the season opener it has nothing to show, and an empty Grand Prix dropdown
+    would leave the rest of the page with no event to load."""
+    this_year = datetime.datetime.now(datetime.timezone.utc).year
+    years = list(range(this_year, FIRST_YEAR - 1, -1))
+    try:
+        if load_schedule(this_year).empty:
+            years.remove(this_year)
+    except Exception:
+        # No calendar published yet (or the API is down) -- same answer.
+        years.remove(this_year)
+    return years
+
+
+# ttl so a race loaded in the first minutes after the flag, before the timing
+# feed is complete, gets fetched again later instead of staying half-empty for
+# as long as the server runs. max_entries because a loaded session with its
+# telemetry is a few hundred MB in memory, and the hosted app has about 1 GB.
+@st.cache_data(ttl=6 * 3600, max_entries=3, show_spinner="Loading timing and telemetry for this session...")
+def load_session(year, event, session_name, telemetry=True):
     session = fastf1.get_session(year, event, session_name)
-    session.load()
+    session.load(telemetry=telemetry, weather=telemetry)
     return session
 
 
@@ -1555,7 +1592,7 @@ section = st.sidebar.radio("Section", [SECTION_WEEKEND, SECTION_SEASON, SECTION_
 session = None
 if section in (SECTION_WEEKEND, SECTION_SEASON):
     st.sidebar.divider()
-    year = st.sidebar.selectbox("Year", options=YEARS)
+    year = st.sidebar.selectbox("Year", options=available_years())
     schedule = load_schedule(year)
     event_name = st.sidebar.selectbox(
         "Grand Prix" if section == SECTION_WEEKEND else "Standings after",
@@ -1570,7 +1607,9 @@ if section in (SECTION_WEEKEND, SECTION_SEASON):
         if section == SECTION_WEEKEND else "Race"
     )
     try:
-        session = load_session(year, event_name, session_name)
+        # The season views only need the session for driver and team colors,
+        # so they skip its telemetry.
+        session = load_session(year, event_name, session_name, telemetry=section == SECTION_WEEKEND)
     except Exception as exc:
         st.error(f"Couldn't load this session (it may not have happened yet): {exc}")
         st.stop()
@@ -1622,14 +1661,15 @@ else:
         "1950 — today", "World championship",
         "All-time records",
         "Every world-championship race ever run, ranked",
-        chip_items=["\U0001F3C6 wins", "\U0001F3C1 poles", "\U0001F4C8 streaks", "\U0001F551 75 seasons"],
+        chip_items=["\U0001F3C6 wins", "\U0001F3C1 poles", "\U0001F4C8 streaks", f"\U0001F551 {datetime.date.today().year - 1949} seasons"],
     )
 
 st.sidebar.markdown(
     '<div class="sidebar-foot">'
     '<b>Data</b> · FastF1 (official timing &amp; telemetry) + Ergast<br>'
     '<b>Cache</b> · every session is fetched once, then read from disk<br>'
-    '<b>Note</b> · overtake counts and title odds are estimates'
+    '<b>Note</b> · overtake counts and title odds are estimates<br>'
+    '<b>Unofficial</b> · not affiliated with Formula 1, the FIA or any team'
     '</div>',
     unsafe_allow_html=True,
 )
@@ -2864,24 +2904,27 @@ if section == SECTION_WEEKEND:
 
                 with col_poles_engine:
                     with chart_panel("Poles by engine", "Power unit behind each pole", accent=PALETTE["blue"]):
-                        engines = poles["Team"].map(ENGINE_SUPPLIERS).fillna(poles["Team"])
-                        by_engine = engines.value_counts().sort_values()
-                        fig_poles_engine = base_figure("", "", "Poles")
-                        fig_poles_engine.update_layout(showlegend=False)
-                        fig_poles_engine.add_trace(
-                            go.Bar(
-                                x=by_engine.to_numpy(), y=by_engine.index, orientation="h",
-                                marker=dict(
-                                    color=by_engine.to_numpy(), colorscale=bar_scale(PALETTE["blue"]),
-                                    line=dict(color="rgba(255,255,255,0.10)", width=1),
-                                ),
-                                text=by_engine.to_numpy(), textposition="outside", cliponaxis=False,
-                                hovertemplate="%{y}: %{x} pole(s)<extra></extra>",
+                        if year not in ENGINE_SUPPLIERS:
+                            st.caption(f"No power unit table for {year} yet.")
+                        else:
+                            engines = poles["Team"].map(ENGINE_SUPPLIERS[year]).fillna(poles["Team"])
+                            by_engine = engines.value_counts().sort_values()
+                            fig_poles_engine = base_figure("", "", "Poles")
+                            fig_poles_engine.update_layout(showlegend=False)
+                            fig_poles_engine.add_trace(
+                                go.Bar(
+                                    x=by_engine.to_numpy(), y=by_engine.index, orientation="h",
+                                    marker=dict(
+                                        color=by_engine.to_numpy(), colorscale=bar_scale(PALETTE["blue"]),
+                                        line=dict(color="rgba(255,255,255,0.10)", width=1),
+                                    ),
+                                    text=by_engine.to_numpy(), textposition="outside", cliponaxis=False,
+                                    hovertemplate="%{y}: %{x} pole(s)<extra></extra>",
+                                )
                             )
-                        )
-                        size_horizontal_bars(fig_poles_engine, by_engine.to_numpy())
-                        style_bars(fig_poles_engine)
-                        st.plotly_chart(fig_poles_engine, width="stretch", config=PLOTLY_CONFIG)
+                            size_horizontal_bars(fig_poles_engine, by_engine.to_numpy())
+                            style_bars(fig_poles_engine)
+                            st.plotly_chart(fig_poles_engine, width="stretch", config=PLOTLY_CONFIG)
         else:
             render_pace_tab()
 
