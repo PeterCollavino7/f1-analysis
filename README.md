@@ -65,11 +65,12 @@ any local run — none of this is used.
   - *Race weekend* opens on a headline strip — winner, fastest lap, speed trap, biggest mover —
     over three tabs in the order a weekend is actually read: **Results** (classification with a
     places-gained column, plus every driver's position lap by lap with the podium band shaded),
-    **Race pace** (tyre strategy, a two-driver head-to-head of every lap time with the
-    compound on the marker and the
-    cumulative gap under it, overtakes, race-pace spread as a box per driver, and fuel-corrected
+    **Race pace** (a race trace of every driver's gap to the winner's average pace, tyre
+    strategy, pit lane time per stop by team, a two-driver head-to-head of every lap time with
+    the compound on the marker and the cumulative gap under it, overtakes, race-pace spread as a box per driver, and fuel-corrected
     tyre degradation; in a qualifying session this tab is **Stats** instead: gap to pole, time
-    lost against each driver's ideal lap, and the season's poles) and **Head-to-head** (the
+    lost against each driver's ideal lap, each team's top speed against its average corner
+    speed, and the season's poles) and **Head-to-head** (the
     mini-sector track dominance map,
     the official sector splits as a diverging gap chart, and a five-panel lap trace — speed,
     delta, throttle, brake, gear — with x-linked axes, so zooming one panel zooms all five).
@@ -81,7 +82,8 @@ any local run — none of this is used.
   - *Season* has **Championship** (both standings tables, points progression with the leader's
     line filled, Monte-Carlo title odds as donuts, and a clinch-round estimate) and **Race by
     race** (season records, a points-per-race heatmap of every scoring driver against every
-    round, and overtakes by race and by driver).
+    round, and overtakes by race and by driver) and **Teammates** (who finished ahead of whom
+    in every qualifying and race, with the median qualifying gap).
   - *All-time records* ranks wins, poles, constructor wins, single-season wins, winning streaks
     and pole-to-win conversion across every championship race since 1950.
 

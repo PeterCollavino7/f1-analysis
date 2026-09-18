@@ -876,6 +876,41 @@ def pole_positions(year, event_names):
     return pd.DataFrame(rows)
 
 
+@st.cache_data(ttl=86400, show_spinner="Comparing every pair of teammates, race by race...")
+def teammate_battles(year, event_names):
+    """One row per team pair per session (qualifying and race) of the season
+    so far: who finished ahead and, in qualifying, the gap in the last part
+    both drivers took part in (Q3, else Q2, else Q1) -- the usual way the
+    qualifying gap between teammates is measured."""
+    rows = []
+    for event_name in event_names:
+        for kind in ("Qualifying", "Race"):
+            try:
+                s = fastf1.get_session(year, event_name, kind)
+                fetch_published(s, year, telemetry=False)
+                # Laps for qualifying: Q1/Q2/Q3 times are worked out from them.
+                s.load(laps=kind == "Qualifying", telemetry=False, weather=False, messages=False)
+                results = s.results
+            except Exception:
+                continue
+            for team, g in results.groupby("TeamName"):
+                if len(g) != 2:
+                    continue
+                g = g.set_index("Abbreviation").sort_index()
+                (a, ra), (b, rb) = list(g.iterrows())
+                if pd.isna(ra["Position"]) or pd.isna(rb["Position"]):
+                    continue
+                gap = np.nan
+                if kind == "Qualifying":
+                    for q in ("Q3", "Q2", "Q1"):
+                        if pd.notna(ra.get(q)) and pd.notna(rb.get(q)):
+                            gap = (rb[q] - ra[q]).total_seconds()  # positive: a quicker
+                            break
+                rows.append({"Event": event_name, "Kind": kind, "Team": team, "A": a, "B": b,
+                             "AAhead": ra["Position"] < rb["Position"], "Gap": gap})
+    return pd.DataFrame(rows)
+
+
 @st.cache_data(ttl=86400, show_spinner="Pulling every result in F1 history for this one...")
 def all_time_finishes(results_position=None, grid_position=None):
     """Every race result in F1 history at one finishing (or starting) slot.
@@ -1866,7 +1901,7 @@ elif section == SECTION_SEASON:
             f"\U0001F4CA round {int(event_row['RoundNumber'])}",
         ],
     )
-    tab_standings, tab_season_stats = st.tabs(["Championship", "Race by race"])
+    tab_standings, tab_season_stats, tab_teammates = st.tabs(["Championship", "Race by race", "Teammates"])
 else:
     render_hero(
         "1950 — today", "World championship",
@@ -2666,7 +2701,312 @@ def render_quali_stats():
     )
 
 
+def neutralised_laps(laps):
+    """Lap numbers run under a safety car (4) or virtual safety car (6)."""
+    return sorted({
+        int(r["LapNumber"]) for _, r in laps.iterrows()
+        if isinstance(r["TrackStatus"], str) and ("4" in r["TrackStatus"] or "6" in r["TrackStatus"])
+    })
+
+
+def render_race_trace():
+    """Every driver's gap to a constant reference pace, lap by lap -- the
+    chart a race engineer reads a race from. Positions say who was ahead;
+    this says by how much, so an undercut, a safety car bunching the field,
+    or a leader managing a margin all show up as a shape.
+
+    The reference is the winner's average lap over the whole race, so the
+    winner's line ends exactly at zero; up is ahead of that pace, down is
+    behind it. Race-like sessions only: practice and qualifying have no
+    common start to measure from."""
+    laps = session.laps.dropna(subset=["LapNumber", "Time"])
+    if laps.empty or session.laps["Position"].isna().all():
+        return
+    start = laps.loc[laps["LapNumber"] == 1, "LapStartTime"].dropna().min()
+    if pd.isna(start):
+        return
+    order = order_by_classification(session, laps["Driver"].unique())
+    winner_laps = laps[laps["Driver"] == order[0]].sort_values("LapNumber")
+    if winner_laps.empty:
+        return
+
+    # A red flag stops the clock for nobody: the minutes spent parked in the
+    # pit lane land in every driver's elapsed time, and left in, they dragged
+    # the whole field 60 s down the chart in one step and bent the reference
+    # pace for the rest of the race. Any winner's lap over 2.5x the median
+    # lap is taken as a stoppage, and its excess is cut out of everyone's
+    # elapsed time by session time -- not lap number, since a lapped car
+    # is on a different lap when the race stops.
+    lap_ends = winner_laps["Time"].dt.total_seconds().to_numpy()
+    lap_lengths = np.diff(np.concatenate([[start.total_seconds()], lap_ends]))
+    typical = np.median(lap_lengths)
+    stoppages = [
+        (end - length + typical, end)
+        for end, length in zip(lap_ends, lap_lengths) if length > 2.5 * typical
+    ]
+
+    def running_time(session_times):
+        t = session_times.dt.total_seconds().to_numpy()
+        paused = sum(np.clip(t - s0, 0, s1 - s0) for s0, s1 in stoppages) if stoppages else 0
+        return t - start.total_seconds() - paused
+
+    reference = running_time(winner_laps["Time"])[-1] / winner_laps["LapNumber"].iloc[-1]
+    styles = build_driver_styles(order, session)
+
+    gaps = {}
+    for driver in order:
+        d = laps[laps["Driver"] == driver].sort_values("LapNumber")
+        if d.empty:
+            continue
+        gaps[driver] = (d["LapNumber"].to_numpy(), (d["LapNumber"] * reference - running_time(d["Time"])).to_numpy())
+
+    # The vertical range follows the top ten: a lapped car falls a full lap
+    # (80-100 s) down the chart, and scaling to it would flatten the fight at
+    # the front into one line. Anyone further back runs off the bottom.
+    front = [gaps[d][1] for d in order[:10] if d in gaps]
+    low = min(np.nanmin(g) for g in front) - 4
+    high = max(np.nanmax(g) for g in front) + 4
+
+    with chart_panel(
+        "Race trace",
+        "Each driver's gap to the winner's average pace · up is ahead of it, safety-car laps shaded",
+        accent=PALETTE["teal"],
+    ):
+        fig = base_figure("", "Gap to reference pace (s)", "Lap")
+        fig.update_layout(height=520, showlegend=False, margin=dict(r=70))
+        fig.update_yaxes(range=[low, high], zeroline=True, zerolinecolor="rgba(255,255,255,0.25)")
+        fig.update_xaxes(range=[0, int(laps["LapNumber"].max()) + 3])
+        for lap_number in neutralised_laps(winner_laps):
+            fig.add_vrect(
+                x0=lap_number - 0.5, x1=lap_number + 0.5,
+                fillcolor="rgba(255,179,64,0.07)", line_width=0, layer="below",
+            )
+        # End-of-line labels for the lines that finish inside the plot, spread
+        # apart where cars finished close together (spread_labels works on a
+        # 0..span scale, hence the shift by the bottom of the range).
+        labelled = [d for d in order if d in gaps and low <= gaps[d][1][-1] <= high]
+        offsets = dict(zip(labelled, spread_labels(
+            [gaps[d][1][-1] - low for d in labelled], plot_height_px=520 - 16 - 44, value_span=high - low,
+        )))
+        for rank, driver in enumerate(order):
+            if driver not in gaps:
+                continue
+            x, y = gaps[driver]
+            color, _ = styles[driver]
+            podium = rank < 3
+            fig.add_trace(go.Scatter(
+                x=x, y=y, mode="lines",
+                line=dict(color=color, width=3 if podium else 1.6),
+                opacity=1.0 if podium else 0.75,
+                text=[f"{driver} · lap {int(n)}: {g:+.1f} s" for n, g in zip(x, y)],
+                hovertemplate="%{text}<extra></extra>",
+            ))
+            if driver in offsets:
+                fig.add_annotation(
+                    x=x[-1], y=y[-1], text=f"<b>{driver}</b>", showarrow=False,
+                    xanchor="left", xshift=6, yshift=-offsets[driver], font=dict(size=10, color=color),
+                    bgcolor="rgba(10,13,20,0.75)", bordercolor=color, borderwidth=1, borderpad=2,
+                )
+        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+    method_note(
+        f"The reference is a car lapping steadily at the winner's average race pace "
+        f"({reference:.3f} s a lap). Each point is how far ahead of (up) or behind (down) that "
+        "imaginary car a driver was at the end of the lap, from the official timing. A pit stop "
+        "is a step down of about the time lost in the lane; a line climbing faster than the ones "
+        "around it is a driver on the quicker pace at that point of the race. Time spent stopped "
+        "under a red flag is taken out for everyone"
+        + (f" ({sum(s1 - s0 for s0, s1 in stoppages) / 60:.0f} min in this race)" if stoppages else "")
+        + ".",
+        "How the race trace is built",
+    )
+    st.write("")
+
+
+def render_pit_stops():
+    """Time spent in the pit lane at every stop, by team: entry line to exit
+    line, which is what a stop actually costs in the race. FastF1 has no
+    stationary time, so a slow wheel change and a slow pit lane read alike;
+    the note says so."""
+    # Race-like sessions only: in practice a trip down the lane is a run
+    # ending in the garage, not a stop.
+    if session.laps["Position"].isna().all():
+        return
+    laps = session.laps.sort_values(["Driver", "LapNumber"])
+    team_of = session.results.set_index("Abbreviation")["TeamName"].to_dict()
+    stops = []
+    for driver, d in laps.groupby("Driver"):
+        d = d.set_index("LapNumber")
+        for lap_number, row in d.iterrows():
+            if pd.isna(row["PitInTime"]) or (lap_number + 1) not in d.index:
+                continue
+            out = d.loc[lap_number + 1, "PitOutTime"]
+            if pd.isna(out):
+                continue
+            seconds = (out - row["PitInTime"]).total_seconds()
+            # Under 10 s isn't a stop through the lane; over 60 s is a red
+            # flag or a repair in the garage, not a pit stop.
+            if 10 < seconds < 60:
+                stops.append({"Team": team_of.get(driver, "?"), "Driver": driver,
+                              "Lap": int(lap_number), "Seconds": seconds})
+    if not stops:
+        return
+    stops = pd.DataFrame(stops)
+    medians = stops.groupby("Team")["Seconds"].median().sort_values()
+    teams = list(reversed(medians.index))  # quickest at the top
+
+    def team_color(name):
+        try:
+            return fastf1.plotting.get_team_color(name, session)
+        except Exception:
+            return "#999999"
+
+    with chart_panel(
+        "Pit lane time by team",
+        "Every stop, entry to exit · the tick is each team's median, quickest at the top",
+        accent=PALETTE["amber"],
+    ):
+        # Dots and a median tick, not bars: the times all sit between about
+        # 20 and 45 s, so the axis can't start at zero without squashing the
+        # differences into a sliver -- and a bar on an axis that doesn't start
+        # at zero draws lengths that mean nothing.
+        fig = base_figure("", "", "Seconds in the pit lane", hovermode="closest")
+        fig.update_layout(height=max(260, 34 * len(teams) + 90), showlegend=False, margin=dict(r=70))
+        fig.update_yaxes(categoryorder="array", categoryarray=teams, tickfont=dict(size=11))
+        fig.add_trace(go.Scatter(
+            x=[medians[t] for t in teams], y=teams, mode="markers",
+            marker=dict(symbol="line-ns", size=24, line=dict(width=3, color=[team_color(t) for t in teams])),
+            hovertemplate="%{y}: median %{x:.1f} s<extra></extra>",
+        ))
+        fig.add_trace(go.Scatter(
+            x=stops["Seconds"], y=stops["Team"], mode="markers",
+            marker=dict(size=9, color=[hex_to_rgba(team_color(t), 0.55) for t in stops["Team"]],
+                        line=dict(color=[team_color(t) for t in stops["Team"]], width=1.5)),
+            text=[f"{r.Driver} · lap {r.Lap}: {r.Seconds:.1f} s" for r in stops.itertuples()],
+            hovertemplate="%{text}<extra></extra>",
+        ))
+        right = stops["Seconds"].max() + 2
+        fig.update_xaxes(range=[stops["Seconds"].min() - 2, right])
+        # The median as a figure, in a column of its own past the last stop.
+        for t in teams:
+            fig.add_annotation(
+                x=right, y=t, xanchor="left", xshift=10, showarrow=False, text=f"{medians[t]:.1f} s",
+                font=dict(size=11, color="rgba(226,232,240,0.8)"),
+            )
+        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+    method_note(
+        "Time from the pit entry line to the exit line, from the official timing, for each stop "
+        "that took between 10 and 60 seconds (shorter isn't a stop through the lane; longer is a "
+        "red flag or a repair). It includes the drive down the speed-limited lane, so it varies "
+        "from track to track, and it can't tell a slow wheel change from a slow lane: FastF1 has "
+        "no stationary time. A drive-through or stop-and-go penalty looks like a stop too.",
+        "What counts as pit lane time",
+    )
+    st.write("")
+
+
+def corner_apex_speeds(distance, speed, window_m=120, min_drop=25):
+    """Minimum speed at each corner of a lap: a point that is the slowest
+    within window_m either side and sits at least min_drop km/h under the
+    fastest point of that stretch. Read off the telemetry itself rather than
+    FastF1's circuit corner list, which comes from a separate web service."""
+    apexes = []
+    for i in range(len(speed)):
+        near = (distance >= distance[i] - window_m) & (distance <= distance[i] + window_m)
+        wide = (distance >= distance[i] - 3 * window_m) & (distance <= distance[i] + 3 * window_m)
+        if speed[i] <= speed[near].min() and speed[wide].max() - speed[i] >= min_drop:
+            if not apexes or distance[i] - apexes[-1][0] > window_m:
+                apexes.append((distance[i], speed[i]))
+    return [v for _, v in apexes]
+
+
+def render_car_characteristics():
+    """Top speed against average corner speed, one point per team, from each
+    team's fastest lap of the session. The only chart here about the car
+    rather than the driver: low drag shows up as top speed, downforce as
+    speed through the corners, and a team's set-up choice as where it sits
+    between the two."""
+    results = session.results
+    rows = []
+    for team, entries in results.groupby("TeamName"):
+        try:
+            lap = session.laps.pick_drivers(list(entries["Abbreviation"])).pick_fastest()
+            if lap is None:
+                continue
+            tel = lap.get_car_data().add_distance()
+        except Exception:
+            continue
+        speed = tel["Speed"].to_numpy(dtype=float)
+        distance = tel["Distance"].to_numpy(dtype=float)
+        apexes = corner_apex_speeds(distance, speed)
+        if len(apexes) < 4:
+            continue
+        rows.append({"Team": team, "Driver": lap["Driver"], "Top": np.nanmax(speed),
+                     "Corner": float(np.mean(apexes)), "Corners": len(apexes)})
+    if len(rows) < 3:
+        return
+    df = pd.DataFrame(rows)
+    df["Label"] = df["Team"].replace({"Red Bull Racing": "Red Bull", "Haas F1 Team": "Haas"})
+
+    # Label placement: above the point, unless that would collide with a
+    # label already placed above a nearby point -- then below, then to the
+    # right. Points closer than ~6% of the axis span in x and ~9% in y count
+    # as nearby (a label is wide and short).
+    span_x = max(df["Corner"].max() - df["Corner"].min(), 1)
+    span_y = max(df["Top"].max() - df["Top"].min(), 1)
+    taken = []
+    positions = []
+    for r in df.sort_values("Top", ascending=False).itertuples():
+        for position in ("top center", "bottom center", "middle right", "middle left"):
+            if not any(p == position and abs(r.Corner - x) < 0.12 * span_x and abs(r.Top - y) < 0.09 * span_y
+                       for x, y, p in taken):
+                break
+        taken.append((r.Corner, r.Top, position))
+        positions.append((r.Index, position))
+    df["Position"] = pd.Series(dict(positions))
+
+    def team_color(name):
+        try:
+            return fastf1.plotting.get_team_color(name, session)
+        except Exception:
+            return "#999999"
+
+    with chart_panel(
+        "Straight-line speed vs. cornering",
+        "Each team's fastest lap · right is quicker through the corners, up is quicker on the straights",
+        accent=PALETTE["violet"],
+    ):
+        fig = base_figure("", "Top speed (km/h)", "Average minimum corner speed (km/h)", hovermode="closest")
+        fig.update_layout(height=460, showlegend=False)
+        fig.add_hline(y=df["Top"].median(), line_color="rgba(255,255,255,0.15)", line_dash="dot")
+        fig.add_vline(x=df["Corner"].median(), line_color="rgba(255,255,255,0.15)", line_dash="dot")
+        fig.add_trace(go.Scatter(
+            x=df["Corner"], y=df["Top"], mode="markers+text",
+            marker=dict(size=15, color=[team_color(t) for t in df["Team"]],
+                        line=dict(color="#0b0e15", width=2)),
+            text=df["Label"], textposition=list(df["Position"]),
+            textfont=dict(size=11, color="rgba(226,232,240,0.8)"),
+            customdata=df[["Team", "Driver", "Corners"]],
+            hovertemplate="%{customdata[0]} (%{customdata[1]})<br>top %{y:.0f} km/h · corners %{x:.1f} km/h"
+                          " over %{customdata[2]} corners<extra></extra>",
+        ))
+        pad_x = (df["Corner"].max() - df["Corner"].min()) * 0.15 + 1
+        pad_y = (df["Top"].max() - df["Top"].min()) * 0.15 + 1
+        fig.update_xaxes(range=[df["Corner"].min() - pad_x, df["Corner"].max() + pad_x])
+        fig.update_yaxes(range=[df["Top"].min() - pad_y, df["Top"].max() + 2 * pad_y])
+        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+    method_note(
+        "One lap per team, the quickest either driver set in this session. **Top speed** is that "
+        "lap's highest reading. **Corner speed** is the average of its minimum speeds, one per "
+        "corner, found in the telemetry as a speed dip of at least 25 km/h. A team up and to the "
+        "left runs less wing (quick on the straights, slower in the corners); down and to the right "
+        "runs more. The dotted lines are the field's medians. It's one lap each, so a tow on the "
+        "straight or a scruffy corner moves a point: read it as a tendency, not a measurement.",
+        "How the two speeds are taken",
+    )
+
+
 def render_pace_tab():
+    render_race_trace()
     strategy_laps = session.laps.dropna(subset=["Stint", "Compound", "LapNumber"])
     if strategy_laps.empty:
         empty_state("No stint data available for a strategy timeline in this session")
@@ -2738,6 +3078,8 @@ def render_pace_tab():
     # a race is argued over, and the one the tyre-age chart kept being asked to
     # do and couldn't (its x axis is tyre life, so two drivers on different
     # strategies get laid on top of each other out of sequence).
+    render_pit_stops()
+
     h2h_laps = session.laps.dropna(subset=["LapTime", "LapNumber"])
     if not h2h_laps.empty and h2h_laps["Driver"].nunique() >= 2:
         # Opens on the winner against the runner-up, so the chart is there
@@ -3301,6 +3643,8 @@ if section == SECTION_WEEKEND:
         # actually fits a qualifying lap.
         if "Qualifying" in session_name:
             render_quali_stats()
+            st.write("")
+            render_car_characteristics()
             st.write("")
             poles = pole_positions(year, tuple(schedule["EventName"].tolist()))
             if poles.empty:
@@ -4109,6 +4453,109 @@ if section == SECTION_SEASON:
                     size_horizontal_bars(fig_driver_overtakes, [c for _, c in ranked_driver_overtakes])
                     style_bars(fig_driver_overtakes)
                     st.plotly_chart(fig_driver_overtakes, width="stretch", config=PLOTLY_CONFIG)
+
+# ------------------------------------------------------------- teammates --
+
+if section == SECTION_SEASON:
+    with tab_teammates:
+        section_head(
+            "Teammate battles",
+            f"{year} season so far",
+            "The one fair fight in Formula 1: same car, same team. Who finished ahead in every "
+            "qualifying and every race, and the typical qualifying gap between them.",
+            accent=PALETTE["violet"],
+        )
+        battles = teammate_battles(year, tuple(schedule["EventName"].tolist()))
+        if battles.empty:
+            empty_state("No completed sessions to compare teammates in yet")
+        else:
+            pairs = []
+            for (team, a, b), g in battles.groupby(["Team", "A", "B"]):
+                quali, race = g[g["Kind"] == "Qualifying"], g[g["Kind"] == "Race"]
+                if len(quali) + len(race) < 3:
+                    continue  # a one-off stand-in pairing isn't a season's battle
+                pairs.append({
+                    "Team": team, "A": a, "B": b,
+                    "QA": int(quali["AAhead"].sum()), "QB": int((~quali["AAhead"]).sum()),
+                    "RA": int(race["AAhead"].sum()), "RB": int((~race["AAhead"]).sum()),
+                    "Gap": quali["Gap"].median(),
+                })
+            pairs = pd.DataFrame(pairs)
+            if pairs.empty:
+                empty_state("No team has had the same two drivers for long enough yet")
+            else:
+                # Most one-sided qualifying battle at the top.
+                pairs["Edge"] = (pairs["QA"] - pairs["QB"]).abs()
+                pairs = pairs.sort_values("Edge", ascending=True)
+                # The team in the label: a driver who changed seat mid-season
+                # (LAW) otherwise appears in two rows with nothing to say why.
+                short_team = {"Red Bull Racing": "Red Bull", "Haas F1 Team": "Haas"}
+                labels = [f"{short_team.get(r.Team, r.Team)} · {r.A} vs {r.B}" for r in pairs.itertuples()]
+
+                def team_color(name):
+                    try:
+                        return fastf1.plotting.get_team_color(name, session)
+                    except Exception:
+                        return "#999999"
+
+                def battle_chart(key_a, key_b, title, hint, gap_notes):
+                    with chart_panel(title, hint, accent=PALETTE["violet"]):
+                        fig = base_figure("", "", "", hovermode="closest")
+                        fig.update_layout(
+                            height=max(260, 40 * len(pairs) + 80), showlegend=False, barmode="relative",
+                            margin=dict(l=8, r=90 if gap_notes else 30, t=16, b=30),
+                        )
+                        fig.update_yaxes(categoryorder="array", categoryarray=labels, tickfont=dict(size=11))
+                        most = max(1, int(pairs[[key_a, key_b]].to_numpy().max()))
+                        edge = most + 3.5  # room for the counts outside the bars
+                        fig.update_xaxes(range=[-edge, edge], showticklabels=False, zeroline=True,
+                                         zerolinecolor="rgba(255,255,255,0.3)")
+                        colors = [team_color(t) for t in pairs["Team"]]
+                        # The first driver of the pair in the team's color,
+                        # the second in white, as the other charts do.
+                        # Counts outside the bars, in the page's text color:
+                        # inside, a 1 or a 2 turned sideways to fit a sliver
+                        # of bar, and dark text on the team colors didn't read.
+                        fig.add_trace(go.Bar(
+                            x=-pairs[key_a], y=labels, orientation="h", marker=dict(color=colors),
+                            text=[f"{r.A} {getattr(r, key_a)}" for r in pairs.itertuples()],
+                            textposition="outside", cliponaxis=False,
+                            hovertemplate="%{text}<extra></extra>",
+                        ))
+                        fig.add_trace(go.Bar(
+                            x=pairs[key_b], y=labels, orientation="h",
+                            marker=dict(color="rgba(238,241,245,0.85)"),
+                            text=[f"{getattr(r, key_b)} {r.B}" for r in pairs.itertuples()],
+                            textposition="outside", cliponaxis=False,
+                            hovertemplate="%{text}<extra></extra>",
+                        ))
+                        if gap_notes:
+                            for r, label in zip(pairs.itertuples(), labels):
+                                if pd.notna(r.Gap):
+                                    faster = r.A if r.Gap > 0 else r.B
+                                    fig.add_annotation(
+                                        x=edge, y=label, xanchor="left", showarrow=False, xshift=8,
+                                        text=f"{faster} +{abs(r.Gap):.3f} s",
+                                        font=dict(size=10.5, color="rgba(226,232,240,0.7)"),
+                                    )
+                        style_bars(fig)
+                        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+
+                col_q, col_r = st.columns(2)
+                with col_q:
+                    battle_chart("QA", "QB", "Qualifying", "Who qualified ahead · median gap on the right", True)
+                with col_r:
+                    battle_chart("RA", "RB", "Race", "Who finished ahead", False)
+                method_note(
+                    "Each bar counts the sessions one driver finished ahead of the other, left for "
+                    "the first driver of the pair (team color), right for the second (white). A race "
+                    "counts even when one of them retired: the classification puts a retirement behind "
+                    "a finisher. The qualifying gap is the median, over the season, of the difference "
+                    "in the last part of qualifying both reached (Q3, else Q2, else Q1), shown next to "
+                    "the quicker driver. Pairings that lasted under three sessions -- a one-off "
+                    "stand-in -- are left out.",
+                    "How the battles are counted",
+                )
 
 # ------------------------------------------------------------ all-time --
 
