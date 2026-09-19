@@ -1117,9 +1117,13 @@ def available_years():
 
 # ttl so a race loaded in the first minutes after the flag, before the timing
 # feed is complete, gets fetched again later instead of staying half-empty for
-# as long as the server runs. max_entries because a loaded session with its
-# telemetry is a few hundred MB in memory, and the hosted app has about 1 GB.
-@st.cache_data(ttl=6 * 3600, max_entries=3, show_spinner="Loading timing and telemetry for this session...")
+# as long as the server runs. cache_resource, not cache_data: cache_data
+# pickles what it stores and hands every rerun its own unpickled copy, so a
+# session with telemetry -- a few hundred MB -- sat in memory once in the
+# cache and again per run, and with three of them cached the hosted app
+# (about 1 GB) ran out of memory and crashed outright. One shared object per
+# session, and at most two of them; nothing in this file writes to a session.
+@st.cache_resource(ttl=6 * 3600, max_entries=2, show_spinner="Loading timing and telemetry for this session...")
 def load_session(year, event, session_name, telemetry=True):
     session = fastf1.get_session(year, event, session_name)
     fetch_published(session, year, telemetry)
