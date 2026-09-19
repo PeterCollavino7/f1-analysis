@@ -1654,60 +1654,113 @@ def build_driver_styles(drivers, session):
     return styles
 
 
-def count_overtakes(session):
-    """Position gains, lap over lap, net of pit stops (the driver's own and
-    any rival's ahead of them), retirements, 3+ place single-lap collapses
-    (spin/mechanical, not a queue of individual passes), and any lap race
-    control deleted a driver's own laptime for track limits. Shared by the
-    per-race overtakes chart and the season-wide stats so the two numbers
-    can't drift apart by using two different counting rules."""
-    overtake_laps = session.laps.dropna(subset=["Position", "LapNumber"])
-    if overtake_laps.empty:
-        return {}
-    overtake_laps = overtake_laps.assign(
-        PitFlag=overtake_laps["PitInTime"].notna() | overtake_laps["PitOutTime"].notna()
+NEUTRALISED = set("4567")  # safety car, red flag, VSC deployed, VSC ending
+SLOW_LAP = 1.05  # a lap this much slower than the field's, same lap, is an incident
+
+
+def detect_passes(session):
+    """Every on-track pass of the race as (lap, passer, passed).
+
+    Pair by pair rather than by net places gained: A passed B on lap N if A
+    was behind B at the end of lap N-1 and ahead at the end of lap N. Each
+    pass is counted once, with who made it and who suffered it, and several
+    passes in one lap all count. What's thrown out is every way a pair can
+    swap order without an overtake:
+
+    - either car in the pit lane on lap N (in-lap or out-lap);
+    - the passed car retiring during lap N (it has no lap N);
+    - the passed car having a problem: a lap N more than 5% slower than the
+      field's median for that same lap is a spin, damage or a failure, not a
+      pass. Same lap, not the driver's own usual pace: under a yellow or in
+      the opening laps the whole field is slower, and measured against their
+      normal pace a car limping home (HAM, Spain 2026: +8% on the field while
+      seven cars went by) sat under any threshold that still let a car
+      simply losing a battle count as passed;
+    - a lap run entirely under neutralisation. The track status of a lap is
+      chronological, so one that *ends* in safety car / VSC / red flag is
+      neutralised, while one that starts under the safety car and ends green
+      is a restart -- and restart passes are real ones;
+    - lap 1 and the first lap after a red flag: those are starts;
+    - a pass race control made the driver hand back ("advantage" / "give
+      back"): both the pass and the handing back are dropped.
+
+    Lapping doesn't need a rule: race order doesn't change when a leader
+    laps a backmarker. A deleted lap time for track limits isn't a reason to
+    drop a pass either -- it's about the lap time, not the move. What this
+    can't see: a pass and a re-pass inside the same lap, since positions
+    exist only at the line."""
+    laps = session.laps.dropna(subset=["Position", "LapNumber"])
+    if laps.empty:
+        return []
+    laps = laps.assign(
+        Pitting=laps["PitInTime"].notna() | laps["PitOutTime"].notna(),
+        Seconds=laps["LapTime"].dt.total_seconds(),
+        Status=laps["TrackStatus"].fillna("1").astype(str),
     )
-    track_limit_laps = set()
+    field = laps[~laps["Pitting"]].groupby("LapNumber")["Seconds"].median()
+
+    # Laps that are starts: lap 1, and the first lap after one with a red flag.
+    red_laps = set(laps.loc[laps["Status"].str.contains("5"), "LapNumber"].astype(int))
+    start_laps = {1} | {n + 1 for n in red_laps}
+
+    # Race control telling a driver to give a place back.
+    handed_back = set()
     try:
         for msg in session.race_control_messages["Message"].astype(str):
-            match = re.search(r"CAR \d+ \((\w+)\).*DELETED - TRACK LIMITS AT TURN \d+ LAP (\d+)", msg)
-            if match:
-                track_limit_laps.add((match.group(1), int(match.group(2))))
+            m = re.search(r"CAR \d+ \((\w{3})\).*(GAINING AN ADVANTAGE|GIVE (?:THE )?POSITION BACK|POSITION.*RETURNED)", msg)
+            if m:
+                handed_back.add(m.group(1))
     except Exception:
-        pass  # race control messages aren't available for every session
-    by_lap = {
-        lap_num: g.set_index("Driver")[["Position", "PitFlag"]]
-        for lap_num, g in overtake_laps.groupby("LapNumber")
-    }
-    lap_numbers = sorted(by_lap)
-    COLLAPSE_THRESHOLD = 3  # places lost in one lap, unpitted, to call it a problem not a pass
+        pass
 
-    overtake_counts = {d: 0 for d in overtake_laps["Driver"].unique()}
-    for prev_lap, lap in zip(lap_numbers, lap_numbers[1:]):
-        prev, cur = by_lap[prev_lap], by_lap[lap]
-        collapsed = {
-            r for r in cur.index
-            if r in prev.index and not cur.loc[r, "PitFlag"] and not prev.loc[r, "PitFlag"]
-            and cur.loc[r, "Position"] - prev.loc[r, "Position"] >= COLLAPSE_THRESHOLD
-        }
-        for driver in cur.index:
-            if driver not in prev.index:
+    by_lap = {int(n): g.set_index("Driver") for n, g in laps.groupby("LapNumber")}
+    passes = []
+    for n in sorted(by_lap):
+        if n in start_laps or (n - 1) not in by_lap:
+            continue
+        prev, cur = by_lap[n - 1], by_lap[n]
+        # A lap that ends neutralised: no passing allowed, any swap is a pit
+        # stop or a penalty. Read off the leader's lap, which the whole field
+        # shares for track status.
+        leader = cur["Position"].idxmin()
+        if cur.loc[leader, "Status"][-1] in NEUTRALISED:
+            continue
+        for a in cur.index:
+            if a not in prev.index or cur.loc[a, "Pitting"]:
                 continue
-            prev_pos, cur_pos = prev.loc[driver, "Position"], cur.loc[driver, "Position"]
-            gain = prev_pos - cur_pos
-            if gain <= 0:
+            for b in cur.index:
+                if b == a or b not in prev.index or cur.loc[b, "Pitting"]:
+                    continue
+                if not (prev.loc[a, "Position"] > prev.loc[b, "Position"]
+                        and cur.loc[a, "Position"] < cur.loc[b, "Position"]):
+                    continue
+                slow = cur.loc[b, "Seconds"]
+                if pd.notna(slow) and pd.notna(field.get(n)) and slow > SLOW_LAP * field[n]:
+                    continue  # b had a problem this lap
+                passes.append((n, a, b))
+
+    # Handed back: a pass by a driver race control named, undone by the same
+    # rival within the next three laps, cancels out -- both moves go.
+    if handed_back:
+        dropped = set()
+        for i, (n, a, b) in enumerate(passes):
+            if a not in handed_back or i in dropped:
                 continue
-            if cur.loc[driver, "PitFlag"] or prev.loc[driver, "PitFlag"]:
-                continue  # the driver's own pit lap -- not a real gain either way
-            if (driver, int(lap)) in track_limit_laps:
-                continue  # race control itself called this lap not clean
-            rivals_ahead = prev.index[prev["Position"] < prev_pos]
-            free_slots = sum(
-                1 for rival in rivals_ahead
-                if (rival not in cur.index) or cur.loc[rival, "PitFlag"] or (rival in collapsed)
-            )
-            overtake_counts[driver] += int(max(0, gain - free_slots))
-    return overtake_counts
+            for j, (m, a2, b2) in enumerate(passes):
+                if j not in dropped and (a2, b2) == (b, a) and n < m <= n + 3:
+                    dropped |= {i, j}
+                    break
+        passes = [p for i, p in enumerate(passes) if i not in dropped]
+    return passes
+
+
+def count_overtakes(session):
+    """Passes made per driver (see detect_passes). Shared by the per-race
+    chart and the season stats so the two can't count differently."""
+    counts = {d: 0 for d in session.laps["Driver"].dropna().unique()}
+    for _, passer, _ in detect_passes(session):
+        counts[passer] = counts.get(passer, 0) + 1
+    return counts
 
 
 def base_figure(title="", yaxis_title="", xaxis_title="", hovermode="x"):
@@ -3257,33 +3310,37 @@ def render_pace_tab():
         empty_state("No lap-by-lap position data available to count overtakes in this session")
     else:
         method_note(
-            "On-track position gains, lap over lap, with a gain credited only for what's left "
-            "after excluding four sources of *free* positions: the driver's own pit in/out lap "
-            "or a lap where their own time got deleted for track limits (race control's own call "
-            "that the lap wasn't clean); however many rivals ahead of them pitted (in or out) "
-            "that same lap; and however many rivals ahead of them lost 3+ places themselves that "
-            "lap without pitting -- a swing that big in one lap is a spin, contact or mechanical "
-            "issue, not a queue of cars each individually passing them. A rival losing 1-2 places "
-            "still counts as fair game, since that's within range of a normal on-track pass -- so "
-            "this can still include a position gained off a smaller, undetectable mistake, or a "
-            "steward's call this data has no way to see. **Treat this as an approximation, not an "
-            "official count.**",
+            "Each overtake is one car getting ahead of another between two crossings of the "
+            "line, found pair by pair in the official lap-end positions -- so three cars passed "
+            "in one lap are three overtakes. Not counted: moves where either car was in the pit "
+            "lane that lap; a car that retired, or had a problem (a lap more than 5% slower than "
+            "the rest of the field on that same lap: a spin, damage, a failure); laps that end under the safety car, VSC or "
+            "a red flag (restart laps do count); lap 1 and the lap after a red flag, which are "
+            "starts; and a place race control made the driver give back, together with the "
+            "handing back. Lapping doesn't change race order, so it never counts. The one blind "
+            "spot: a pass and a re-pass within the same lap, since positions only exist at the line.",
             "How an overtake is counted here",
         )
-        overtake_counts = count_overtakes(session)
+        race_passes = detect_passes(session)
+        overtake_counts = {}
+        passed_counts = {}
+        for _, passer, passed in race_passes:
+            overtake_counts[passer] = overtake_counts.get(passer, 0) + 1
+            passed_counts[passed] = passed_counts.get(passed, 0) + 1
 
         ranked_overtakes = sorted(overtake_counts.items(), key=lambda kv: kv[1], reverse=True)
         ranked_overtakes = [(d, c) for d, c in ranked_overtakes if c > 0]
         if not ranked_overtakes:
-            empty_state("No on-track position gains detected in this session")
+            empty_state("No overtakes detected in this session")
         else:
             overtake_styles = build_driver_styles([d for d, _ in ranked_overtakes], session)
             with chart_panel(
                 "Overtakes by driver",
-                "On-track position gains, net of pit stops and incidents",
+                f"{len(race_passes)} on-track passes, pit stops, incidents and starts left out · "
+                "hover for who they passed",
                 accent=PALETTE["teal"],
             ):
-                fig_overtakes = base_figure("", "", "Position gains")
+                fig_overtakes = base_figure("", "", "Overtakes", hovermode="closest")
                 fig_overtakes.update_layout(showlegend=False)
                 fig_overtakes.add_trace(
                     go.Bar(
@@ -3296,7 +3353,13 @@ def render_pace_tab():
                         ),
                         text=[c for _, c in ranked_overtakes],
                         textposition="outside", cliponaxis=False,
-                        hovertemplate="%{y}: %{x} position gains<extra></extra>",
+                        customdata=[
+                            [", ".join(f"{b} (lap {n})" for n, a, b in race_passes if a == d),
+                             passed_counts.get(d, 0)]
+                            for d, _ in ranked_overtakes
+                        ],
+                        hovertemplate="<b>%{y}</b>: %{x} overtakes, passed %{customdata[1]} times"
+                                      "<br>%{customdata[0]}<extra></extra>",
                     )
                 )
                 fig_overtakes.update_yaxes(autorange="reversed")
