@@ -9,6 +9,9 @@ import io
 import logging
 import os
 import re
+import shutil
+import tempfile
+import threading
 import urllib.parse
 import zipfile
 from contextlib import contextmanager
@@ -39,6 +42,23 @@ from plotly.subplots import make_subplots
 # folder is gitignored, and the disk it lives on is wiped on every restart.
 os.makedirs("cache", exist_ok=True)
 fastf1.Cache.enable_cache("cache")
+
+
+# FastF1 keeps its HTTP cache in one SQLite database, and Streamlit runs every
+# visitor -- and every rerun -- on its own thread. Two of them loading at once
+# (two tabs, or a page opened while another was still loading) hit that
+# database from two threads, and on the hosted app that killed the whole
+# process with a segmentation fault. Every call into FastF1 or Ergast that
+# can touch the network or the cache goes through this one process-wide
+# lock. It wraps those calls only, never a Streamlit-cached function: those
+# have locks of their own, and holding this one while waiting on one of
+# them could deadlock two threads against each other.
+@st.cache_resource
+def _fastf1_lock():
+    return threading.RLock()
+
+
+FF1_LOCK = _fastf1_lock()
 
 MAX_DRIVERS = 2
 CHART_HEIGHT = 360
@@ -774,9 +794,10 @@ def load_standings(year, round_number):
     session's points locally, since Ergast already carries the official,
     round-by-round running totals and doesn't need every prior race of the
     season fetched and parsed just to get today's totals."""
-    ergast = Ergast()
-    drivers = ergast.get_driver_standings(season=year, round=round_number).content[0]
-    constructors = ergast.get_constructor_standings(season=year, round=round_number).content[0]
+    with FF1_LOCK:
+        ergast = Ergast()
+        drivers = ergast.get_driver_standings(season=year, round=round_number).content[0]
+        constructors = ergast.get_constructor_standings(season=year, round=round_number).content[0]
     return drivers, constructors
 
 
@@ -789,10 +810,13 @@ def load_standings_progression(year, up_to_round):
     ergast = Ergast()
     driver_rows, constructor_rows = [], []
     for rnd in range(1, up_to_round + 1):
-        for _, r in ergast.get_driver_standings(season=year, round=rnd).content[0].iterrows():
+        with FF1_LOCK:
+            driver_table = ergast.get_driver_standings(season=year, round=rnd).content[0]
+            constructor_table = ergast.get_constructor_standings(season=year, round=rnd).content[0]
+        for _, r in driver_table.iterrows():
             name = r["driverCode"] if pd.notna(r["driverCode"]) else f"{r['givenName']} {r['familyName']}"
             driver_rows.append({"Round": rnd, "Driver": name, "Points": r["points"]})
-        for _, r in ergast.get_constructor_standings(season=year, round=rnd).content[0].iterrows():
+        for _, r in constructor_table.iterrows():
             constructor_rows.append({"Round": rnd, "Constructor": r["constructorName"], "Points": r["points"]})
     return pd.DataFrame(driver_rows), pd.DataFrame(constructor_rows)
 
@@ -802,7 +826,8 @@ def total_rounds_in_season(year):
     """Full season length (including rounds not yet run) -- load_schedule
     filters those out for the race picker, but the title-fight odds below
     need to know how many races are actually still left to simulate."""
-    schedule = fastf1.get_event_schedule(year)
+    with FF1_LOCK:
+        schedule = fastf1.get_event_schedule(year)
     return int(schedule[schedule["RoundNumber"] > 0]["RoundNumber"].max())
 
 
@@ -810,7 +835,8 @@ def total_rounds_in_season(year):
 def event_name_for_round(year, round_number):
     """Round number -> Grand Prix name, including rounds not yet run (the
     clinch-round estimate below can land on a future race)."""
-    schedule = fastf1.get_event_schedule(year)
+    with FF1_LOCK:
+        schedule = fastf1.get_event_schedule(year)
     match = schedule[schedule["RoundNumber"] == round_number]
     return match.iloc[0]["EventName"] if len(match) else f"Round {round_number}"
 
@@ -829,13 +855,15 @@ def season_stats(year, event_names):
     driver_overtakes = {}
     for event_name in event_names:
         try:
-            race = fastf1.get_session(year, event_name, "Race")
+            with FF1_LOCK:
+                race = fastf1.get_session(year, event_name, "Race")
             fetch_published(race, year, telemetry=False)
             # Laps and race control messages are all count_overtakes() and the
             # results columns read. Telemetry is most of a session's download
             # and memory, and across a whole season it's what pushed this past
             # the hosted app's ~1 GB.
-            race.load(telemetry=False, weather=False)
+            with FF1_LOCK:
+                race.load(telemetry=False, weather=False)
             _ = race.laps  # raises if they didn't load, so the race is skipped
         except Exception:
             continue
@@ -887,9 +915,11 @@ def pole_positions(year, event_names):
     rows = []
     for event_name in event_names:
         try:
-            quali = fastf1.get_session(year, event_name, "Qualifying")
+            with FF1_LOCK:
+                quali = fastf1.get_session(year, event_name, "Qualifying")
             fetch_published(quali, year, telemetry=False)
-            quali.load(laps=False, telemetry=False, weather=False, messages=False)
+            with FF1_LOCK:
+                quali.load(laps=False, telemetry=False, weather=False, messages=False)
         except Exception:
             continue
         pole = quali.results.sort_values("Position").iloc[0]
@@ -909,10 +939,12 @@ def teammate_battles(year, event_names):
     for event_name in event_names:
         for kind in ("Qualifying", "Race"):
             try:
-                s = fastf1.get_session(year, event_name, kind)
+                with FF1_LOCK:
+                    s = fastf1.get_session(year, event_name, kind)
                 fetch_published(s, year, telemetry=False)
                 # Laps for qualifying: Q1/Q2/Q3 times are worked out from them.
-                s.load(laps=kind == "Qualifying", telemetry=False, weather=False, messages=False)
+                with FF1_LOCK:
+                    s.load(laps=kind == "Qualifying", telemetry=False, weather=False, messages=False)
                 results = s.results
                 round_number = int(s.event["RoundNumber"])
             except Exception:
@@ -959,10 +991,11 @@ def all_time_finishes(results_position=None, grid_position=None):
     page_size = 100
     rows, offset = [], 0
     while True:
-        response = ergast.get_race_results(
-            results_position=results_position, grid_position=grid_position,
-            limit=page_size, offset=offset,
-        )
+        with FF1_LOCK:
+            response = ergast.get_race_results(
+                results_position=results_position, grid_position=grid_position,
+                limit=page_size, offset=offset,
+            )
         frames = response.content
         if not frames:
             break
@@ -989,7 +1022,8 @@ def full_name(row):
 
 @st.cache_data(ttl=3600, show_spinner="Loading the race calendar...")
 def load_schedule(year):
-    schedule = fastf1.get_event_schedule(year)
+    with FF1_LOCK:
+        schedule = fastf1.get_event_schedule(year)
     schedule = schedule[schedule["RoundNumber"] > 0]
     # Only weekends that have actually happened -- a future round on the
     # calendar has no session data yet, so it has no business in the
@@ -1068,7 +1102,8 @@ def published_sessions(year):
         return available
     for _, event in load_schedule(year).iterrows():
         for name in session_names_for(event):
-            key = session_key(fastf1.get_session(year, event["EventName"], name))
+            with FF1_LOCK:
+                key = session_key(fastf1.get_session(year, event["EventName"], name))
             if f"{key}.base.zip" in published:
                 available.setdefault(event["EventName"], []).append(name)
     return available
@@ -1091,8 +1126,16 @@ def fetch_published(session, year, telemetry):
         # storage host, which is what that host requires.
         response = requests.get(url, headers=github_headers("application/octet-stream"), timeout=180)
         response.raise_for_status()
+        # Unpacked beside the target and moved in file by file, so another
+        # thread opening the same session never reads a half-written file.
         os.makedirs(folder, exist_ok=True)
-        zipfile.ZipFile(io.BytesIO(response.content)).extractall(folder)
+        staging = tempfile.mkdtemp(dir=folder)
+        try:
+            zipfile.ZipFile(io.BytesIO(response.content)).extractall(staging)
+            for name in os.listdir(staging):
+                os.replace(os.path.join(staging, name), os.path.join(folder, name))
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
         open(marker, "w").close()
 
 
@@ -1125,7 +1168,8 @@ def available_years():
 # session, and at most two of them; nothing in this file writes to a session.
 @st.cache_resource(ttl=6 * 3600, max_entries=2, show_spinner="Loading timing and telemetry for this session...")
 def load_session(year, event, session_name, telemetry=True):
-    session = fastf1.get_session(year, event, session_name)
+    with FF1_LOCK:
+        session = fastf1.get_session(year, event, session_name)
     fetch_published(session, year, telemetry)
     # load() doesn't raise when the timing feed fails -- it logs, returns, and
     # leaves session.laps unset, so the first chart to touch the laps crashed
@@ -1142,7 +1186,8 @@ def load_session(year, event, session_name, telemetry=True):
     fastf1_logger = logging.getLogger("fastf1")
     fastf1_logger.addHandler(handler)
     try:
-        session.load(telemetry=telemetry, weather=telemetry)
+        with FF1_LOCK:
+            session.load(telemetry=telemetry, weather=telemetry)
     finally:
         fastf1_logger.removeHandler(handler)
     try:
