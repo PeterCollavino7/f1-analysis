@@ -8,6 +8,7 @@ __pycache__/
 # without installing it.
 *.png
 !assets/screenshot-*.png
+!assets/icon.png
 streamlit.log
 publish_data.log
 .streamlit/secrets.toml

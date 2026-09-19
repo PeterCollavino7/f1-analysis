@@ -20,7 +20,14 @@ import streamlit as st
 
 # "auto": open on a desktop, closed on a phone -- forced open, the sidebar
 # covered four fifths of a phone screen and the charts peeked out beside it.
-st.set_page_config(page_title="F1 Dashboard", layout="wide", initial_sidebar_state="auto")
+# Tab icon: the sidebar's checkered flag on a red pole (assets/icon.svg is the
+# source; the PNG is what browsers get). Without it the tab shows Streamlit's own.
+st.set_page_config(
+    page_title="F1 Dashboard",
+    page_icon=os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.png"),
+    layout="wide",
+    initial_sidebar_state="auto",
+)
 # Streamlit's top-right "running" icon (a boxed bike/runner glyph) reads as a
 # stray UI element against this page's own dark theme -- hidden rather than
 # restyled, since which icon it is isn't under our control, only whether it
