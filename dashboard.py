@@ -592,8 +592,9 @@ st.markdown(
     .pit-time { font-family: var(--mono); font-size: 1.25rem; font-weight: 700; color: var(--ink); }
     .pit-time small { font-size: 0.75rem; font-weight: 400; color: var(--ink-faint); margin-left: 2px; }
     .pit-bar { width: 4px; height: 1.6rem; border-radius: 2px; }
-    .pit-who { min-width: 0; }
-    .pit-who b { font-family: var(--display); letter-spacing: 0.02em; white-space: nowrap; }
+    .pit-who { min-width: 0; overflow: hidden; }
+    .pit-who b { display: block; font-family: var(--display); letter-spacing: 0.02em; white-space: nowrap;
+                 overflow: hidden; text-overflow: ellipsis; }
     .pit-who span { display: block; font-size: 0.8rem; color: var(--ink-faint); }
     .pit-extra { font-size: 0.8rem; color: var(--ink-dim); text-align: right; white-space: nowrap;
                  max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }
@@ -2117,16 +2118,22 @@ if section == SECTION_WEEKEND:
     # tab hides "who won".
     stat_cards(weekend_headline_cards(session, session_name))
     st.write("")
-    # Results first, then pace, then telemetry: the order a weekend is
-    # actually read -- what happened, how the race ran, then the lap-by-lap
-    # forensics. (Telemetry used to be first, which opened the page on the
-    # deepest view of all.)
-    # A qualifying session has no race to pace: its middle tab is "Stats"
-    # instead (gap to pole, ideal lap, the season's poles) -- see
-    # render_quali_stats().
-    tab_classification, tab_pace, tab_telemetry = st.tabs(
-        ["Results", "Stats" if "Qualifying" in session_name else "Race pace", "Head-to-head"]
-    )
+    # One tab per question, in the order a weekend is read: what happened
+    # (Results: classification, positions, overtakes), how it was run
+    # (Strategy: tyres and pit stops -- races and sprints only), who was quick
+    # (Pace; "Stats" for qualifying: gap to pole, ideal lap, car
+    # characteristics), then the lap-level forensics (Head-to-head). Charts
+    # used to pile up in one "Race pace" tab whatever they were about.
+    is_race_like = session_name in ("Race", "Sprint")
+    if "Qualifying" in session_name:
+        tab_labels = ["Results", "Stats", "Head-to-head"]
+    elif is_race_like:
+        tab_labels = ["Results", "Strategy", "Pace", "Head-to-head"]
+    else:
+        tab_labels = ["Results", "Pace", "Head-to-head"]
+    weekend_tabs = st.tabs(tab_labels)
+    tab_classification, tab_pace, tab_telemetry = weekend_tabs[0], weekend_tabs[-2], weekend_tabs[-1]
+    tab_strategy = weekend_tabs[1] if is_race_like else None
 elif section == SECTION_SEASON:
     render_hero(
         f"{year}", "World championship",
@@ -2800,6 +2807,60 @@ if section == SECTION_WEEKEND:
     with tab_telemetry:
         render_telemetry_tab()
 
+def render_poles():
+    """Poles by driver and by engine, season so far -- a season statistic,
+    so on the Season view rather than on one qualifying session."""
+    poles = pole_positions(year, tuple(schedule["EventName"].tolist()))
+    if poles.empty:
+        empty_state("No completed qualifying sessions to count poles from yet")
+    else:
+        col_poles_driver, col_poles_engine = st.columns(2)
+
+        with col_poles_driver:
+            with chart_panel("Poles by driver", f"{year} season so far", accent=PALETTE["violet"]):
+                by_driver = poles["Driver"].value_counts().sort_values()
+                fig_poles_driver = base_figure("", "", "Poles")
+                fig_poles_driver.update_layout(showlegend=False)
+                fig_poles_driver.add_trace(
+                    go.Bar(
+                        x=by_driver.to_numpy(), y=by_driver.index, orientation="h",
+                        marker=dict(
+                            color=[safe_driver_color(d, session) for d in by_driver.index],
+                            line=dict(color="rgba(255,255,255,0.10)", width=1),
+                        ),
+                        text=by_driver.to_numpy(), textposition="outside", cliponaxis=False,
+                        hovertemplate="%{y}: %{x} pole(s)<extra></extra>",
+                    )
+                )
+                size_horizontal_bars(fig_poles_driver, by_driver.to_numpy())
+                style_bars(fig_poles_driver)
+                st.plotly_chart(fig_poles_driver, width="stretch", config=PLOTLY_CONFIG)
+
+        with col_poles_engine:
+            with chart_panel("Poles by engine", "Power unit behind each pole", accent=PALETTE["blue"]):
+                if year not in ENGINE_SUPPLIERS:
+                    st.caption(f"No power unit table for {year} yet.")
+                else:
+                    engines = poles["Team"].map(ENGINE_SUPPLIERS[year]).fillna(poles["Team"])
+                    by_engine = engines.value_counts().sort_values()
+                    fig_poles_engine = base_figure("", "", "Poles")
+                    fig_poles_engine.update_layout(showlegend=False)
+                    fig_poles_engine.add_trace(
+                        go.Bar(
+                            x=by_engine.to_numpy(), y=by_engine.index, orientation="h",
+                            marker=dict(
+                                color=by_engine.to_numpy(), colorscale=bar_scale(PALETTE["blue"]),
+                                line=dict(color="rgba(255,255,255,0.10)", width=1),
+                            ),
+                            text=by_engine.to_numpy(), textposition="outside", cliponaxis=False,
+                            hovertemplate="%{y}: %{x} pole(s)<extra></extra>",
+                        )
+                    )
+                    size_horizontal_bars(fig_poles_engine, by_engine.to_numpy())
+                    style_bars(fig_poles_engine)
+                    st.plotly_chart(fig_poles_engine, width="stretch", config=PLOTLY_CONFIG)
+
+
 # ------------------------------------------------------------------ pace --
 
 def render_position_chart():
@@ -2975,7 +3036,8 @@ DHL_SOURCE = (
 
 
 def pit_record_cards(this_event=None):
-    """Fastest stop here (if given), this season's and the all-time one."""
+    """Fastest stop here (if given), this season's and the all-time one --
+    and on the season view, where there's no race, the award leader."""
     cards = []
     if this_event:
         r = this_event
@@ -2991,6 +3053,10 @@ def pit_record_cards(this_event=None):
         r = everything[0]
         cards.append(("All-time record", f"{r['duration']:.2f} s",
                       f"{r['firstName'][0]}. {r['lastName']} · {r['team']} · {r['year']}", PALETTE["amber"]))
+    if this_event is None and season and season["standings"]:
+        leader = season["standings"][0]
+        cards.append(("DHL award leader", leader["team"], f"{leader['points']} points",
+                      dhl_team_color(leader["team"])))
     stat_cards(cards)
 
 
@@ -3120,7 +3186,9 @@ def render_car_characteristics():
     )
 
 
-def render_pace_tab():
+def render_strategy_tab():
+    """Race and sprint only: how each team ran its race -- the tyres, and
+    the stops that changed them."""
     strategy_laps = session.laps.dropna(subset=["Stint", "Compound", "LapNumber"])
     if strategy_laps.empty:
         empty_state("No stint data available for a strategy timeline in this session")
@@ -3185,6 +3253,80 @@ def render_pace_tab():
 
     st.write("")
 
+    render_pit_stops()
+
+
+def render_overtakes():
+    """The race's overtakes, on the Results tab: part of what happened in the
+    race rather than of how fast anyone was."""
+    overtake_laps = session.laps.dropna(subset=["Position", "LapNumber"])
+    if overtake_laps.empty:
+        empty_state("No lap-by-lap position data available to count overtakes in this session")
+    else:
+        method_note(
+            "Each overtake is one car getting ahead of another between two crossings of the "
+            "line, found pair by pair in the official lap-end positions -- so three cars passed "
+            "in one lap are three overtakes. Not counted: moves where either car was in the pit "
+            "lane that lap; a car that retired, or had a problem (a lap more than 5% slower than "
+            "the rest of the field on that same lap: a spin, damage, a failure); laps that end under the safety car, VSC or "
+            "a red flag (restart laps do count); lap 1 and the lap after a red flag, which are "
+            "starts; and a place race control made the driver give back, together with the "
+            "handing back. Lapping doesn't change race order, so it never counts. The one blind "
+            "spot: a pass and a re-pass within the same lap, since positions only exist at the line.",
+            "How an overtake is counted here",
+        )
+        race_passes = detect_passes(session)
+        overtake_counts = {}
+        passed_counts = {}
+        for _, passer, passed in race_passes:
+            overtake_counts[passer] = overtake_counts.get(passer, 0) + 1
+            passed_counts[passed] = passed_counts.get(passed, 0) + 1
+
+        ranked_overtakes = sorted(overtake_counts.items(), key=lambda kv: kv[1], reverse=True)
+        ranked_overtakes = [(d, c) for d, c in ranked_overtakes if c > 0]
+        if not ranked_overtakes:
+            empty_state("No overtakes detected in this session")
+        else:
+            overtake_styles = build_driver_styles([d for d, _ in ranked_overtakes], session)
+            with chart_panel(
+                "Overtakes by driver",
+                f"{len(race_passes)} on-track passes, pit stops, incidents and starts left out · "
+                "hover for who they passed",
+                accent=PALETTE["teal"],
+            ):
+                fig_overtakes = base_figure("", "", "Overtakes", hovermode="closest")
+                fig_overtakes.update_layout(showlegend=False)
+                fig_overtakes.add_trace(
+                    go.Bar(
+                        x=[c for _, c in ranked_overtakes],
+                        y=[d for d, _ in ranked_overtakes],
+                        orientation="h",
+                        marker=dict(
+                            color=[overtake_styles[d][0] for d, _ in ranked_overtakes],
+                            line=dict(color="rgba(255,255,255,0.10)", width=1),
+                        ),
+                        text=[c for _, c in ranked_overtakes],
+                        textposition="outside", cliponaxis=False,
+                        customdata=[
+                            [", ".join(f"{b} (lap {n})" for n, a, b in race_passes if a == d),
+                             passed_counts.get(d, 0)]
+                            for d, _ in ranked_overtakes
+                        ],
+                        hovertemplate="<b>%{y}</b>: %{x} overtakes, passed %{customdata[1]} times"
+                                      "<br>%{customdata[0]}<extra></extra>",
+                    )
+                )
+                fig_overtakes.update_yaxes(autorange="reversed")
+                size_horizontal_bars(fig_overtakes, [c for _, c in ranked_overtakes])
+                style_bars(fig_overtakes)
+                st.plotly_chart(fig_overtakes, width="stretch", config=PLOTLY_CONFIG)
+
+    st.write("")
+
+
+def render_pace_tab():
+    """Who was quick: two drivers lap by lap, the field's spread of lap
+    times, and how fast each compound wore."""
     # Head-to-head race pace: two drivers' lap times side by side, on the tyre
     # each was actually running. The degradation fits further down answer "how
     # fast does this compound wear for the whole field"; they can't answer "was
@@ -3192,8 +3334,6 @@ def render_pace_tab():
     # a race is argued over, and the one the tyre-age chart kept being asked to
     # do and couldn't (its x axis is tyre life, so two drivers on different
     # strategies get laid on top of each other out of sequence).
-    render_pit_stops()
-
     h2h_laps = session.laps.dropna(subset=["LapTime", "LapNumber"])
     if not h2h_laps.empty and h2h_laps["Driver"].nunique() >= 2:
         # Opens on the winner against the runner-up, so the chart is there
@@ -3399,70 +3539,6 @@ def render_pace_tab():
                 )
 
         st.write("")
-
-    overtake_laps = session.laps.dropna(subset=["Position", "LapNumber"])
-    if overtake_laps.empty:
-        empty_state("No lap-by-lap position data available to count overtakes in this session")
-    else:
-        method_note(
-            "Each overtake is one car getting ahead of another between two crossings of the "
-            "line, found pair by pair in the official lap-end positions -- so three cars passed "
-            "in one lap are three overtakes. Not counted: moves where either car was in the pit "
-            "lane that lap; a car that retired, or had a problem (a lap more than 5% slower than "
-            "the rest of the field on that same lap: a spin, damage, a failure); laps that end under the safety car, VSC or "
-            "a red flag (restart laps do count); lap 1 and the lap after a red flag, which are "
-            "starts; and a place race control made the driver give back, together with the "
-            "handing back. Lapping doesn't change race order, so it never counts. The one blind "
-            "spot: a pass and a re-pass within the same lap, since positions only exist at the line.",
-            "How an overtake is counted here",
-        )
-        race_passes = detect_passes(session)
-        overtake_counts = {}
-        passed_counts = {}
-        for _, passer, passed in race_passes:
-            overtake_counts[passer] = overtake_counts.get(passer, 0) + 1
-            passed_counts[passed] = passed_counts.get(passed, 0) + 1
-
-        ranked_overtakes = sorted(overtake_counts.items(), key=lambda kv: kv[1], reverse=True)
-        ranked_overtakes = [(d, c) for d, c in ranked_overtakes if c > 0]
-        if not ranked_overtakes:
-            empty_state("No overtakes detected in this session")
-        else:
-            overtake_styles = build_driver_styles([d for d, _ in ranked_overtakes], session)
-            with chart_panel(
-                "Overtakes by driver",
-                f"{len(race_passes)} on-track passes, pit stops, incidents and starts left out · "
-                "hover for who they passed",
-                accent=PALETTE["teal"],
-            ):
-                fig_overtakes = base_figure("", "", "Overtakes", hovermode="closest")
-                fig_overtakes.update_layout(showlegend=False)
-                fig_overtakes.add_trace(
-                    go.Bar(
-                        x=[c for _, c in ranked_overtakes],
-                        y=[d for d, _ in ranked_overtakes],
-                        orientation="h",
-                        marker=dict(
-                            color=[overtake_styles[d][0] for d, _ in ranked_overtakes],
-                            line=dict(color="rgba(255,255,255,0.10)", width=1),
-                        ),
-                        text=[c for _, c in ranked_overtakes],
-                        textposition="outside", cliponaxis=False,
-                        customdata=[
-                            [", ".join(f"{b} (lap {n})" for n, a, b in race_passes if a == d),
-                             passed_counts.get(d, 0)]
-                            for d, _ in ranked_overtakes
-                        ],
-                        hovertemplate="<b>%{y}</b>: %{x} overtakes, passed %{customdata[1]} times"
-                                      "<br>%{customdata[0]}<extra></extra>",
-                    )
-                )
-                fig_overtakes.update_yaxes(autorange="reversed")
-                size_horizontal_bars(fig_overtakes, [c for _, c in ranked_overtakes])
-                style_bars(fig_overtakes)
-                st.plotly_chart(fig_overtakes, width="stretch", config=PLOTLY_CONFIG)
-
-    st.write("")
 
     try:
         pace_laps = session.laps.pick_quicklaps()
@@ -3759,68 +3835,18 @@ def render_pace_tab():
 
 if section == SECTION_WEEKEND:
     with tab_pace:
-        # Every chart here -- position-by-lap, tyre strategy, overtakes,
-        # degradation -- is built around a real stint across a race distance.
-        # A qualifying lap is a single push lap with nothing to show in any of
-        # them, so instead of a wall of "no stint data" / "no strategy data" /
-        # etc. info boxes, this just says so once and points at the tab that
-        # actually fits a qualifying lap.
+        # Qualifying gets its own Stats here: pace and degradation are built
+        # around stints over a race distance, and a qualifying lap is a single
+        # push lap.
         if "Qualifying" in session_name:
             render_quali_stats()
             st.write("")
             render_car_characteristics()
-            st.write("")
-            poles = pole_positions(year, tuple(schedule["EventName"].tolist()))
-            if poles.empty:
-                empty_state("No completed qualifying sessions to count poles from yet")
-            else:
-                col_poles_driver, col_poles_engine = st.columns(2)
-
-                with col_poles_driver:
-                    with chart_panel("Poles by driver", f"{year} season so far", accent=PALETTE["violet"]):
-                        by_driver = poles["Driver"].value_counts().sort_values()
-                        fig_poles_driver = base_figure("", "", "Poles")
-                        fig_poles_driver.update_layout(showlegend=False)
-                        fig_poles_driver.add_trace(
-                            go.Bar(
-                                x=by_driver.to_numpy(), y=by_driver.index, orientation="h",
-                                marker=dict(
-                                    color=[safe_driver_color(d, session) for d in by_driver.index],
-                                    line=dict(color="rgba(255,255,255,0.10)", width=1),
-                                ),
-                                text=by_driver.to_numpy(), textposition="outside", cliponaxis=False,
-                                hovertemplate="%{y}: %{x} pole(s)<extra></extra>",
-                            )
-                        )
-                        size_horizontal_bars(fig_poles_driver, by_driver.to_numpy())
-                        style_bars(fig_poles_driver)
-                        st.plotly_chart(fig_poles_driver, width="stretch", config=PLOTLY_CONFIG)
-
-                with col_poles_engine:
-                    with chart_panel("Poles by engine", "Power unit behind each pole", accent=PALETTE["blue"]):
-                        if year not in ENGINE_SUPPLIERS:
-                            st.caption(f"No power unit table for {year} yet.")
-                        else:
-                            engines = poles["Team"].map(ENGINE_SUPPLIERS[year]).fillna(poles["Team"])
-                            by_engine = engines.value_counts().sort_values()
-                            fig_poles_engine = base_figure("", "", "Poles")
-                            fig_poles_engine.update_layout(showlegend=False)
-                            fig_poles_engine.add_trace(
-                                go.Bar(
-                                    x=by_engine.to_numpy(), y=by_engine.index, orientation="h",
-                                    marker=dict(
-                                        color=by_engine.to_numpy(), colorscale=bar_scale(PALETTE["blue"]),
-                                        line=dict(color="rgba(255,255,255,0.10)", width=1),
-                                    ),
-                                    text=by_engine.to_numpy(), textposition="outside", cliponaxis=False,
-                                    hovertemplate="%{y}: %{x} pole(s)<extra></extra>",
-                                )
-                            )
-                            size_horizontal_bars(fig_poles_engine, by_engine.to_numpy())
-                            style_bars(fig_poles_engine)
-                            st.plotly_chart(fig_poles_engine, width="stretch", config=PLOTLY_CONFIG)
         else:
             render_pace_tab()
+    if tab_strategy is not None:
+        with tab_strategy:
+            render_strategy_tab()
 
 # --------------------------------------------------------- classification --
 
@@ -3921,6 +3947,8 @@ if section == SECTION_WEEKEND:
             if not has_quali_times:
                 st.write("")
                 render_position_chart()
+                st.write("")
+                render_overtakes()
 
 # ------------------------------------------------------------- standings --
 
@@ -4578,6 +4606,11 @@ if section == SECTION_SEASON:
                     style_bars(fig_driver_overtakes)
                     st.plotly_chart(fig_driver_overtakes, width="stretch", config=PLOTLY_CONFIG)
 
+if section == SECTION_SEASON:
+    with tab_season_stats:
+        st.write("")
+        render_poles()
+
 # ------------------------------------------------------------- teammates --
 
 if section == SECTION_SEASON:
@@ -4773,26 +4806,29 @@ if section == SECTION_SEASON:
                     winners.append((e, stops[0]))
             season_best = min((w["duration"] for _, w in winners), default=None)
 
-            col_gp, col_side = st.columns([3, 2])
-            with col_gp:
-                with chart_panel("Fastest stop at every Grand Prix", "In calendar order · the season's quickest highlighted",
-                                 accent=PALETTE["amber"]):
-                    pit_list(
-                        [{"duration": w["duration"], "name": f"{w['firstName'][0]}. {w['lastName']}",
-                          "team": w["team"], "extra": e["short_title"], "rank": e["abbr"]}
-                         for e, w in winners],
-                        best_duration=season_best,
-                    )
-            with col_side:
+            # The two top tens side by side -- the same list twice, one for the
+            # season and one for all time, so they read as a pair -- then the
+            # every-Grand-Prix list at full width, where its circuit names fit.
+            col_season, col_ever = st.columns(2)
+            with col_season:
                 with chart_panel(f"Fastest of {year}", "The ten quickest stops of the season", accent=PALETTE["amber"]):
                     pit_list([{"duration": r["duration"], "name": f"{r['firstName'][0]}. {r['lastName']}",
                                "team": r["team"], "extra": r["abbreviation"]}
                               for r in sorted(season_dhl["fastest"], key=lambda x: x["duration"])[:10]])
-                st.write("")
+            with col_ever:
                 with chart_panel("Fastest ever", f"Since {DHL_FIRST_SEASON}, all seasons pooled", accent=PALETTE["amber"]):
                     pit_list([{"duration": r["duration"], "name": f"{r['firstName'][0]}. {r['lastName']}",
                                "team": r["team"], "extra": f"{r['abbreviation']} {r['year']}"}
                               for r in dhl_all_time_fastest()[:10]])
+            st.write("")
+            with chart_panel("Fastest stop at every Grand Prix", "In calendar order · the season's quickest highlighted",
+                             accent=PALETTE["amber"]):
+                pit_list(
+                    [{"duration": w["duration"], "name": f"{w['firstName'][0]}. {w['lastName']}",
+                      "team": w["team"], "extra": e["short_title"], "rank": e["abbr"]}
+                     for e, w in winners],
+                    best_duration=season_best,
+                )
             st.write("")
             if season_dhl["standings"]:
                 with chart_panel("DHL Fastest Pit Stop Award", "Team standings · points for the ten quickest stops of every race",

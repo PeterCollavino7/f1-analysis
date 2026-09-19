@@ -63,16 +63,18 @@ any local run — none of this is used.
   questions at three different sizes: **Race weekend** (one session), **Season** (one
   championship) and **All-time records** (the sport).
   - *Race weekend* opens on a headline strip — winner, fastest lap, speed trap, biggest mover —
-    over three tabs in the order a weekend is actually read: **Results** (classification with a
-    places-gained column, plus every driver's position lap by lap with the podium band shaded),
-    **Race pace** (tyre strategy, the race's ten fastest pit stops by stationary time (DHL) beside the season and all-time records, a two-driver head-to-head of every lap time with
-    the compound on the marker and the cumulative gap under it, overtakes, race-pace spread as a box per driver, and fuel-corrected
-    tyre degradation; in a qualifying session this tab is **Stats** instead: gap to pole, time
-    lost against each driver's ideal lap, each team's top speed against its average corner
-    speed, and the season's poles) and **Head-to-head** (the
-    mini-sector track dominance map,
-    the official sector splits as a diverging gap chart, and a five-panel lap trace — speed,
-    delta, throttle, brake, gear — with x-linked axes, so zooming one panel zooms all five).
+    over one tab per question, in the order a weekend is read. For a race or sprint:
+    **Results** (classification with a places-gained column, every driver's position lap by lap
+    with the podium band shaded, and overtakes, counted pair by pair), **Strategy** (tyre
+    strategy, and the race's ten fastest pit stops by stationary time from DHL beside the season
+    and all-time records), **Pace** (a two-driver head-to-head of every lap time with the
+    compound on the marker and the cumulative gap under it, race-pace spread as a box per
+    driver, and fuel-corrected tyre degradation) and **Head-to-head** (the mini-sector track
+    dominance map, the official sector splits as a diverging gap chart, and a five-panel lap
+    trace — speed, delta, throttle, brake, gear — with x-linked axes, so zooming one panel zooms
+    all five). Qualifying has **Results**, **Stats** (gap to pole, time lost against each
+    driver's ideal lap, each team's top speed against its average corner speed) and
+    **Head-to-head**; practice has Results, Pace and Head-to-head.
     The session dropdown is built from that weekend's real `Session1..5` names in the FastF1
     schedule, so Sprint Qualifying/Sprint show up only on sprint weekends. Delta time is computed
     by interpolating the other lap's elapsed time onto the reference lap's distance grid with
@@ -81,7 +83,7 @@ any local run — none of this is used.
   - *Season* has **Championship** (both standings tables, points progression with the leader's
     line filled, Monte-Carlo title odds as donuts, and a clinch-round estimate) and **Race by
     race** (season records, a points-per-race heatmap of every scoring driver against every
-    round, and overtakes by race and by driver) and **Teammates** (every pairing's qualifying,
+    round, overtakes by race and by driver, and poles by driver and by engine), **Teammates** (every pairing's qualifying,
     race and points head-to-head with the median qualifying gap, then one pairing race by race:
     qualifying gap and both finishing positions) and **Pit stops** (DHL stationary times: the
     fastest stop at every Grand Prix, the season's and the all-time top ten since 2023, and the
