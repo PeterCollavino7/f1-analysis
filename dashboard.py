@@ -18,7 +18,9 @@ from contextlib import contextmanager
 
 import streamlit as st
 
-st.set_page_config(page_title="F1 Dashboard", layout="wide", initial_sidebar_state="expanded")
+# "auto": open on a desktop, closed on a phone -- forced open, the sidebar
+# covered four fifths of a phone screen and the charts peeked out beside it.
+st.set_page_config(page_title="F1 Dashboard", layout="wide", initial_sidebar_state="auto")
 # Streamlit's top-right "running" icon (a boxed bike/runner glyph) reads as a
 # stray UI element against this page's own dark theme -- hidden rather than
 # restyled, since which icon it is isn't under our control, only whether it
@@ -69,6 +71,32 @@ M_TO_FT = 3.28084
 # these charts need -- the zoom that matters (drag on the telemetry panels)
 # works without it.
 PLOTLY_CONFIG = {"displayModeBar": False}
+
+
+def on_phone():
+    try:
+        agent = st.context.headers.get("User-Agent", "")
+    except Exception:
+        return False
+    return "Mobi" in agent or "Android" in agent
+
+
+def plotly_chart(fig, **kwargs):
+    """st.plotly_chart, fixed up for phones. A legend down the right-hand side
+    (and the wide right margin kept for it) took half of a 390 px screen and
+    squeezed the plot into a sliver; on a phone it goes under the chart."""
+    if on_phone():
+        legend = fig.layout.legend
+        if fig.layout.showlegend is not False and legend.orientation != "h":
+            fig.update_layout(legend=dict(orientation="h", x=0, xanchor="left", y=-0.18, yanchor="top"))
+            if (fig.layout.margin.r or 0) > 60:
+                fig.update_layout(margin=dict(r=16))
+            fig.update_layout(margin=dict(b=max(fig.layout.margin.b or 0, 90)))
+    return st.plotly_chart(fig, **kwargs)
+# Bumped whenever detect_passes() changes: it's an argument of season_stats(),
+# so a new counting rule can't be served from a day-old cache of the old one
+# (a code push doesn't clear Streamlit's cache on the hosted app).
+OVERTAKE_RULES = 2
 MIN_LAPS_FOR_TREND = 10  # per compound, for the pooled fuel-correction fit
 MIN_LAPS_PER_DRIVER = 6  # per driver+compound, for the per-driver breakdown
 TRACK_SECTOR_COUNT = 20  # mini-sectors for the track dominance map, not the official S1/S2/S3
@@ -203,6 +231,8 @@ st.markdown(
        local run it holds no menu and no deploy button, and clearing its
        background lets the hero sit at the very top of the page. */
     [data-testid="stHeader"] { background: transparent; }
+    .table-scroll { width: 100%; overflow-x: auto; }
+
     /* The Deploy button is Streamlit Cloud's call to action; this app runs on
        a laptop and has nowhere to deploy to, so it's dead weight sitting over
        the hero. Same reasoning as the status widget (hidden at the top of
@@ -809,6 +839,45 @@ st.markdown(
        bands here are already separated by their own cards, so the rule is
        faded out at both ends to read as a breath rather than a wall. */
     hr { border: none; height: 1px; background: linear-gradient(90deg, transparent, var(--line-strong), transparent); }
+    /* ---------------------------------------------------------------- phones */
+    /* Checked at 390 px (an iPhone) in headless Chrome. Kept last in the
+       stylesheet so it overrides the desktop rules above it. */
+    @media (max-width: 640px) {
+        .block-container { padding-left: 0.75rem; padding-right: 0.75rem; padding-top: 3.2rem; }
+        /* The header bar is see-through on a desktop; on a phone its menu
+           buttons sat on top of the tab strip once the page scrolled. */
+        [data-testid="stHeader"] { background: rgba(11, 14, 21, 0.92); backdrop-filter: blur(6px); }
+        /* Results tables keep what a phone reader wants -- position, driver,
+           the numbers -- and drop the car badge, the team and the status
+           column, whose content the gap column already carries. */
+        table.standings th.badge, table.standings td.badge,
+        table.standings th.team, table.standings td.team,
+        table.standings th.status, table.standings td.status { display: none; }
+        table.standings th { padding: 0 0.35rem 0.5rem; }
+        table.standings td { padding: 0.45rem 0.35rem; font-size: 0.86rem; }
+        table.standings td.mono { font-size: 0.8rem; }
+        table.standings td.num { width: auto; }
+        table.standings td.delta { width: auto; white-space: nowrap; font-size: 0.78rem; }
+        /* Pit stop lists: the lap / points / circuit line drops under the
+           name instead of squeezing it to "George R...". */
+        .pit-row { grid-template-columns: 1.8rem 4.2rem 4px 1fr; row-gap: 0.1rem; }
+        .pit-time { font-size: 1.05rem; }
+        .pit-extra { grid-column: 4; text-align: left; max-width: none; margin-top: -0.2rem; }
+        .panel-head .hint { display: block; margin-top: 0.2rem; }
+        /* Teammates overview: the pair's color already says which team it
+           is, and the median gap is in the pairing detail below -- without
+           those two columns the table fits a phone instead of scrolling. */
+        /* (.tm-scroll prefix: these rules sit above the base .tm-table
+           ones in the stylesheet, so they need the extra specificity.) */
+        .tm-scroll .tm-table { min-width: 0; table-layout: auto; font-size: 0.82rem; }
+        .tm-scroll .tm-table col.c-team, .tm-scroll .tm-table col.c-gap,
+        .tm-scroll .tm-table th:first-child, .tm-scroll .tm-table td:first-child,
+        .tm-scroll .tm-table th:last-child, .tm-scroll .tm-table td:last-child { display: none; }
+        .tm-scroll .tm-table th, .tm-scroll .tm-table td { padding: 8px 4px; }
+        .tm-scroll .tm-split { gap: 4px; }
+        .tm-scroll .tm-split b { min-width: 1.6em; }
+        .tm-scroll .tm-bar { min-width: 14px; }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -877,7 +946,7 @@ def event_name_for_round(year, round_number):
 # with it the cache key, so a shorter ttl buys no freshness -- it only makes
 # some visitor wait for the whole season to be recomputed.
 @st.cache_data(ttl=86400, show_spinner="Crunching stats across every race run so far this season...")
-def season_stats(year, event_names):
+def season_stats(year, event_names, rules=OVERTAKE_RULES):
     """One row per completed race: total overtakes (same rule as the
     per-race chart), retirements, the biggest grid-to-finish recovery, and
     the closest podium fight. Loads every completed race's full Race
@@ -1416,8 +1485,8 @@ def render_table(rows, columns):
     has_badges = any(row.get("badge") for row in rows)
     html = ["<table class='standings'><thead><tr>"]
     if has_badges:
-        html.append("<th></th>")
-    html += [f"<th>{header}</th>" for _, header, _ in columns]
+        html.append("<th class='badge'></th>")
+    html += [f"<th class='{css_class}'>{header}</th>" for _, header, css_class in columns]
     html.append("</tr></thead><tbody>")
     for rank, row in enumerate(rows):
         html.append("<tr class='leader'>" if rank == 0 else "<tr>")
@@ -1429,7 +1498,7 @@ def render_table(rows, columns):
             html.append(f"<td class='{css_class}'{accent}>{row.get(key, '')}</td>")
         html.append("</tr>")
     html.append("</tbody></table>")
-    st.markdown("".join(html), unsafe_allow_html=True)
+    st.markdown("<div class='table-scroll'>" + "".join(html) + "</div>", unsafe_allow_html=True)
 
 
 def circuit_outline(session, stroke=5):
@@ -1702,8 +1771,21 @@ def format_lap_time(td):
     return f"{minutes}:{seconds:06.3f}" if minutes else f"{seconds:.3f}"
 
 
+# Short codes for everyone the classification doesn't place, read from
+# FastF1's ClassifiedPosition letter: a table cell says DNF, not "Retired
+# (43 laps)" or the driver's name and "did not finish".
+NOT_CLASSIFIED = {"R": "DNF", "D": "DSQ", "W": "DNS", "N": "NC", "E": "EXC", "F": "DNQ"}
+
+
+def result_code(row):
+    """DNF / DSQ / DNS / ... for an unclassified driver, else None."""
+    return NOT_CLASSIFIED.get(str(row.get("ClassifiedPosition", "")).strip())
+
+
 def format_race_gap(row, leader_laps):
     status = row.get("Status")
+    if result_code(row):
+        return result_code(row)
     if row.get("Position") == 1:
         td = row.get("Time")
         if pd.isna(td):
@@ -2600,7 +2682,7 @@ def render_telemetry_tab():
                 fig_sectors.add_vline(x=0, line_color="rgba(255,255,255,0.35)", line_width=1)
                 size_horizontal_bars(fig_sectors, deltas, row_px=42, extra_px=90, pad_frac=0.45)
                 style_bars(fig_sectors, radius=4)
-                st.plotly_chart(fig_sectors, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_sectors, width="stretch", config=PLOTLY_CONFIG)
 
     common_distance = common_distance_m * (M_TO_FT if imperial else 1)
     # Pre-formatted "1,346 m" strings as the x values themselves, so the
@@ -2800,7 +2882,7 @@ def render_telemetry_tab():
         "Speed, delta, throttle, brake and gear -- drag any panel to zoom, all five stay in sync",
         accent=PALETTE["blue"],
     ):
-        st.plotly_chart(fig_telemetry, width="stretch", config=PLOTLY_CONFIG)
+        plotly_chart(fig_telemetry, width="stretch", config=PLOTLY_CONFIG)
 
 
 if section == SECTION_WEEKEND:
@@ -2834,7 +2916,7 @@ def render_poles():
                 )
                 size_horizontal_bars(fig_poles_driver, by_driver.to_numpy())
                 style_bars(fig_poles_driver)
-                st.plotly_chart(fig_poles_driver, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_poles_driver, width="stretch", config=PLOTLY_CONFIG)
 
         with col_poles_engine:
             with chart_panel("Poles by engine", "Power unit behind each pole", accent=PALETTE["blue"]):
@@ -2858,7 +2940,7 @@ def render_poles():
                     )
                     size_horizontal_bars(fig_poles_engine, by_engine.to_numpy())
                     style_bars(fig_poles_engine)
-                    st.plotly_chart(fig_poles_engine, width="stretch", config=PLOTLY_CONFIG)
+                    plotly_chart(fig_poles_engine, width="stretch", config=PLOTLY_CONFIG)
 
 
 # ------------------------------------------------------------------ pace --
@@ -2931,7 +3013,7 @@ def render_position_chart():
                     bgcolor="rgba(10,13,20,0.75)", bordercolor=color, borderwidth=1, borderpad=2,
                 )
 
-            st.plotly_chart(fig_position, width="stretch", config=PLOTLY_CONFIG)
+            plotly_chart(fig_position, width="stretch", config=PLOTLY_CONFIG)
 
 
 def render_quali_stats():
@@ -2966,7 +3048,7 @@ def render_quali_stats():
             )
             size_horizontal_bars(fig_gap, gap.to_numpy(), row_px=26, bar_px=16)
             style_bars(fig_gap)
-            st.plotly_chart(fig_gap, width="stretch", config=PLOTLY_CONFIG)
+            plotly_chart(fig_gap, width="stretch", config=PLOTLY_CONFIG)
 
     with col_ideal:
         with chart_panel(
@@ -2993,7 +3075,7 @@ def render_quali_stats():
             )
             size_horizontal_bars(fig_ideal, lost.to_numpy(), row_px=26, bar_px=16)
             style_bars(fig_ideal)
-            st.plotly_chart(fig_ideal, width="stretch", config=PLOTLY_CONFIG)
+            plotly_chart(fig_ideal, width="stretch", config=PLOTLY_CONFIG)
     method_note(
         "**Ideal lap** is the sum of a driver's three best sector times, wherever in the "
         "session each was set. The bar is how much slower their best actual lap was than that "
@@ -3174,7 +3256,7 @@ def render_car_characteristics():
         pad_y = (df["Top"].max() - df["Top"].min()) * 0.15 + 1
         fig.update_xaxes(range=[df["Corner"].min() - pad_x, df["Corner"].max() + pad_x])
         fig.update_yaxes(range=[df["Top"].min() - pad_y, df["Top"].max() + 2 * pad_y])
-        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+        plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
     method_note(
         "One lap per team, the quickest either driver set in this session. **Top speed** is that "
         "lap's highest reading. **Corner speed** is the average of its minimum speeds, one per "
@@ -3242,7 +3324,7 @@ def render_strategy_tab():
                         )
                     )
 
-            st.plotly_chart(fig_strategy, width="stretch", config=PLOTLY_CONFIG)
+            plotly_chart(fig_strategy, width="stretch", config=PLOTLY_CONFIG)
             # Compound colors as chips instead of a Plotly legend: the legend
             # entry for a stacked bar chart is one swatch per trace, and there
             # is one trace per stint -- roughly sixty of them.
@@ -3319,7 +3401,7 @@ def render_overtakes():
                 fig_overtakes.update_yaxes(autorange="reversed")
                 size_horizontal_bars(fig_overtakes, [c for _, c in ranked_overtakes])
                 style_bars(fig_overtakes)
-                st.plotly_chart(fig_overtakes, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_overtakes, width="stretch", config=PLOTLY_CONFIG)
 
     st.write("")
 
@@ -3529,7 +3611,7 @@ def render_pace_tab():
                 fig_h2h.update_yaxes(title_text="Lap time (s)", row=1, col=1)
                 fig_h2h.update_yaxes(title_text="Gap (s)", row=2, col=1)
                 fig_h2h.update_xaxes(title_text="Lap", row=2, col=1)
-                st.plotly_chart(fig_h2h, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_h2h, width="stretch", config=PLOTLY_CONFIG)
                 chips(
                     [
                         (COMPOUND_COLORS.get(c, "#999999"), str(c).title())
@@ -3590,7 +3672,7 @@ def render_pace_tab():
                 annotation_text="best median", annotation_position="top",
                 annotation_font=dict(size=10, color="rgba(226,232,240,0.5)"),
             )
-            st.plotly_chart(fig_spread, width="stretch", config=PLOTLY_CONFIG)
+            plotly_chart(fig_spread, width="stretch", config=PLOTLY_CONFIG)
 
         st.write("")
 
@@ -3759,7 +3841,7 @@ def render_pace_tab():
                     "and clicking the same one again clears the chart.",
                     pace_driver_options, on_pick=close_laps_popover, limit=1,
                 )
-            st.plotly_chart(fig_pace, width="stretch", config=PLOTLY_CONFIG)
+            plotly_chart(fig_pace, width="stretch", config=PLOTLY_CONFIG)
 
         if not coeffs:
             empty_state("No compound had a usable degradation fit in this session")
@@ -3830,7 +3912,7 @@ def render_pace_tab():
                 fig_drivers.update_yaxes(autorange="reversed")
                 size_horizontal_bars(fig_drivers, [s for _, s in ranked])
                 style_bars(fig_drivers)
-                st.plotly_chart(fig_drivers, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_drivers, width="stretch", config=PLOTLY_CONFIG)
 
 
 if section == SECTION_WEEKEND:
@@ -3912,7 +3994,7 @@ if section == SECTION_WEEKEND:
                     row["grid"] = str(int(r["GridPosition"])) if pd.notna(r["GridPosition"]) else "—"
                     row["gap"] = format_race_gap(r, leader_laps)
                     row["pts"] = f"{r['Points']:.0f}" if pd.notna(r["Points"]) else "0"
-                    row["status"] = r["Status"] if pd.notna(r["Status"]) else "—"
+                    row["status"] = result_code(r) or (r["Status"] if pd.notna(r["Status"]) else "—")
                     # Places gained or lost, as its own column. It was derivable
                     # from Grid and Pos side by side, but only by subtracting
                     # two numbers in your head for every one of twenty rows --
@@ -4089,7 +4171,7 @@ if section == SECTION_SEASON:
                     "Running total after every round · top 10 labelled",
                     accent=driver_color(driver_order[0]) if driver_order else None,
                 ):
-                    st.plotly_chart(fig_driver_progress, width="stretch", config=PLOTLY_CONFIG)
+                    plotly_chart(fig_driver_progress, width="stretch", config=PLOTLY_CONFIG)
                 st.write("")
 
             leader_points = driver_standings["points"].max()
@@ -4194,7 +4276,7 @@ if section == SECTION_SEASON:
                     "Running total after every round",
                     accent=team_color(constructor_order[0]) if constructor_order else None,
                 ):
-                    st.plotly_chart(fig_constructor_progress, width="stretch", config=PLOTLY_CONFIG)
+                    plotly_chart(fig_constructor_progress, width="stretch", config=PLOTLY_CONFIG)
                 st.write("")
 
             leader_team_points = constructor_standings["points"].max()
@@ -4314,7 +4396,7 @@ if section == SECTION_SEASON:
                 histories = [race_history(driver_progress, "Driver", n) for n in names]
                 odds = simulate_top3_odds(names, top3_drivers["points"].tolist(), histories, remaining_rounds)
                 colors = [driver_color(n) for n in names]
-                st.plotly_chart(
+                plotly_chart(
                     odds_chart("", names, [odds[n] for n in names], colors),
                     width="stretch", config=PLOTLY_CONFIG,
                 )
@@ -4336,7 +4418,7 @@ if section == SECTION_SEASON:
                 histories_c = [race_history(constructor_progress, "Constructor", n) for n in names_c]
                 odds_c = simulate_top3_odds(names_c, top3_constructors["points"].tolist(), histories_c, remaining_rounds)
                 colors_c = [team_color(n) for n in names_c]
-                st.plotly_chart(
+                plotly_chart(
                     odds_chart("", names_c, [odds_c[n] for n in names_c], colors_c),
                     width="stretch", config=PLOTLY_CONFIG,
                 )
@@ -4529,7 +4611,7 @@ if section == SECTION_SEASON:
                     )
                     fig_heat.update_yaxes(autorange="reversed", showgrid=False)
                     fig_heat.update_xaxes(showgrid=False, showspikes=False, side="top")
-                    st.plotly_chart(fig_heat, width="stretch", config=PLOTLY_CONFIG)
+                    plotly_chart(fig_heat, width="stretch", config=PLOTLY_CONFIG)
 
                 st.write("")
 
@@ -4571,7 +4653,7 @@ if section == SECTION_SEASON:
                 )
                 size_horizontal_bars(fig_overtakes_season, ordered_races["Overtakes"].to_numpy())
                 style_bars(fig_overtakes_season)
-                st.plotly_chart(fig_overtakes_season, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_overtakes_season, width="stretch", config=PLOTLY_CONFIG)
 
             st.write("")
 
@@ -4604,7 +4686,7 @@ if section == SECTION_SEASON:
                     fig_driver_overtakes.update_yaxes(autorange="reversed")
                     size_horizontal_bars(fig_driver_overtakes, [c for _, c in ranked_driver_overtakes])
                     style_bars(fig_driver_overtakes)
-                    st.plotly_chart(fig_driver_overtakes, width="stretch", config=PLOTLY_CONFIG)
+                    plotly_chart(fig_driver_overtakes, width="stretch", config=PLOTLY_CONFIG)
 
 if section == SECTION_SEASON:
     with tab_season_stats:
@@ -4758,7 +4840,7 @@ if section == SECTION_SEASON:
                     fig.add_hline(y=0, line_color="rgba(255,255,255,0.35)", line_width=1)
                     fig.update_xaxes(tickangle=-45, tickfont=dict(size=10))
                     style_bars(fig, radius=3)
-                    st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+                    plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
             with col_r:
                 with chart_panel(
                     "Finishing positions, race by race",
@@ -4778,7 +4860,7 @@ if section == SECTION_SEASON:
                             hovertemplate=f"{driver}: P%{{y}}<extra></extra>",
                         ))
                     fig.update_xaxes(tickangle=-45, tickfont=dict(size=10))
-                    st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+                    plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
 # ------------------------------------------------------------ pit stops --
 
@@ -4846,7 +4928,7 @@ if section == SECTION_SEASON:
                     ))
                     size_horizontal_bars(fig, points)
                     style_bars(fig)
-                    st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+                    plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
             st.markdown(DHL_SOURCE, unsafe_allow_html=True)
 
 # ------------------------------------------------------------ all-time --
@@ -4950,7 +5032,7 @@ if section == SECTION_ALL_TIME:
                 )
                 size_horizontal_bars(fig_wins, top_wins.to_numpy())
                 style_bars(fig_wins)
-                st.plotly_chart(fig_wins, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_wins, width="stretch", config=PLOTLY_CONFIG)
 
             st.write("")
 
@@ -4971,7 +5053,7 @@ if section == SECTION_ALL_TIME:
                 )
                 size_horizontal_bars(fig_poles_all, top_poles.to_numpy())
                 style_bars(fig_poles_all)
-                st.plotly_chart(fig_poles_all, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_poles_all, width="stretch", config=PLOTLY_CONFIG)
 
             st.write("")
 
@@ -5026,7 +5108,7 @@ if section == SECTION_ALL_TIME:
                     )
                     size_horizontal_bars(fig_conv, poles_conv, pad_frac=0.22)
                     style_bars(fig_conv)
-                    st.plotly_chart(fig_conv, width="stretch", config=PLOTLY_CONFIG)
+                    plotly_chart(fig_conv, width="stretch", config=PLOTLY_CONFIG)
 
             st.write("")
 
@@ -5047,7 +5129,7 @@ if section == SECTION_ALL_TIME:
                 )
                 size_horizontal_bars(fig_team_wins, top_team_wins.to_numpy())
                 style_bars(fig_team_wins)
-                st.plotly_chart(fig_team_wins, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_team_wins, width="stretch", config=PLOTLY_CONFIG)
 
             st.write("")
             races_per_season = chronological.groupby("season").size()
@@ -5088,7 +5170,7 @@ if section == SECTION_ALL_TIME:
                 "Top 12 · with the share of that season's races, since the calendar has grown from 7 to 24",
                 accent=PALETTE["amber"],
             ):
-                st.plotly_chart(fig_season_wins, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_season_wins, width="stretch", config=PLOTLY_CONFIG)
 
             st.write("")
             # A new streak starts wherever the winner differs from the previous
@@ -5128,7 +5210,7 @@ if section == SECTION_ALL_TIME:
                 "Consecutive races won, counted across season boundaries — a streak doesn't reset in January",
                 accent=PALETTE["pink"],
             ):
-                st.plotly_chart(fig_streaks, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_streaks, width="stretch", config=PLOTLY_CONFIG)
 
             st.write("")
 
@@ -5149,4 +5231,4 @@ if section == SECTION_ALL_TIME:
                 )
                 size_horizontal_bars(fig_team_poles, poles_by_team.to_numpy())
                 style_bars(fig_team_poles)
-                st.plotly_chart(fig_team_poles, width="stretch", config=PLOTLY_CONFIG)
+                plotly_chart(fig_team_poles, width="stretch", config=PLOTLY_CONFIG)
