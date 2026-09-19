@@ -2710,85 +2710,59 @@ def neutralised_laps(laps):
 
 
 def render_race_trace():
-    """Every driver's gap to a constant reference pace, lap by lap -- the
-    chart a race engineer reads a race from. Positions say who was ahead;
-    this says by how much, so an undercut, a safety car bunching the field,
-    or a leader managing a margin all show up as a shape.
+    """Every top-ten finisher's gap to whoever was leading, lap by lap -- the
+    chart broadcasts use to show how a race was won.
 
-    The reference is the winner's average lap over the whole race, so the
-    winner's line ends exactly at zero; up is ahead of that pace, down is
-    behind it. Race-like sessions only: practice and qualifying have no
-    common start to measure from."""
+    It replaced a classic race trace (gap to the winner's average pace),
+    which Peter rightly called unreadable: everything that happens to the
+    whole field at once -- a virtual safety car, the stops everyone makes
+    under it -- showed as one 60-second plunge for every line, lapped cars
+    sank a full lap off the scale, and the actual fight at the front was
+    squeezed into a thin band. Measured from the leader instead, anything
+    common to the field cancels out; what's left is who gained on whom.
+    Race-like sessions only."""
     laps = session.laps.dropna(subset=["LapNumber", "Time"])
     if laps.empty or session.laps["Position"].isna().all():
         return
-    start = laps.loc[laps["LapNumber"] == 1, "LapStartTime"].dropna().min()
-    if pd.isna(start):
-        return
-    order = order_by_classification(session, laps["Driver"].unique())
-    winner_laps = laps[laps["Driver"] == order[0]].sort_values("LapNumber")
-    if winner_laps.empty:
-        return
-
-    # A red flag stops the clock for nobody: the minutes spent parked in the
-    # pit lane land in every driver's elapsed time, and left in, they dragged
-    # the whole field 60 s down the chart in one step and bent the reference
-    # pace for the rest of the race. Any winner's lap over 2.5x the median
-    # lap is taken as a stoppage, and its excess is cut out of everyone's
-    # elapsed time by session time -- not lap number, since a lapped car
-    # is on a different lap when the race stops.
-    lap_ends = winner_laps["Time"].dt.total_seconds().to_numpy()
-    lap_lengths = np.diff(np.concatenate([[start.total_seconds()], lap_ends]))
-    typical = np.median(lap_lengths)
-    stoppages = [
-        (end - length + typical, end)
-        for end, length in zip(lap_ends, lap_lengths) if length > 2.5 * typical
-    ]
-
-    def running_time(session_times):
-        t = session_times.dt.total_seconds().to_numpy()
-        paused = sum(np.clip(t - s0, 0, s1 - s0) for s0, s1 in stoppages) if stoppages else 0
-        return t - start.total_seconds() - paused
-
-    reference = running_time(winner_laps["Time"])[-1] / winner_laps["LapNumber"].iloc[-1]
+    order = order_by_classification(session, laps["Driver"].unique())[:10]
     styles = build_driver_styles(order, session)
+    # The leader at each lap is simply the first car to complete it.
+    leader_time = laps.groupby("LapNumber")["Time"].min()
 
+    CAP = 60.0  # seconds: past this, a car is out of the fight for the lead
     gaps = {}
     for driver in order:
         d = laps[laps["Driver"] == driver].sort_values("LapNumber")
         if d.empty:
             continue
-        gaps[driver] = (d["LapNumber"].to_numpy(), (d["LapNumber"] * reference - running_time(d["Time"])).to_numpy())
-
-    # The vertical range follows the top ten: a lapped car falls a full lap
-    # (80-100 s) down the chart, and scaling to it would flatten the fight at
-    # the front into one line. Anyone further back runs off the bottom.
-    front = [gaps[d][1] for d in order[:10] if d in gaps]
-    low = min(np.nanmin(g) for g in front) - 4
-    high = max(np.nanmax(g) for g in front) + 4
+        gap = (d["Time"].to_numpy() - leader_time.loc[d["LapNumber"]].to_numpy()) / np.timedelta64(1, "s")
+        gaps[driver] = (d["LapNumber"].to_numpy(), np.minimum(gap, CAP + 5))
+    if not gaps:
+        return
+    last_lap = int(laps["LapNumber"].max())
+    neutralised = neutralised_laps(laps[laps["Driver"] == order[0]])
 
     with chart_panel(
-        "Race trace",
-        "Each driver's gap to the winner's average pace · up is ahead of it, safety-car laps shaded",
+        "Gap to the leader",
+        "Top ten finishers, lap by lap · a spike that comes back is a pit stop, safety-car laps shaded",
         accent=PALETTE["teal"],
     ):
-        fig = base_figure("", "Gap to reference pace (s)", "Lap")
-        fig.update_layout(height=520, showlegend=False, margin=dict(r=70))
-        fig.update_yaxes(range=[low, high], zeroline=True, zerolinecolor="rgba(255,255,255,0.25)")
-        fig.update_xaxes(range=[0, int(laps["LapNumber"].max()) + 3])
-        for lap_number in neutralised_laps(winner_laps):
+        fig = base_figure("", "Seconds behind the leader", "Lap")
+        fig.update_layout(height=480, showlegend=False, margin=dict(r=70))
+        fig.update_yaxes(range=[CAP, -1.5], zeroline=False)
+        fig.update_xaxes(range=[0.5, last_lap + 4])
+        for lap_number in neutralised:
             fig.add_vrect(
                 x0=lap_number - 0.5, x1=lap_number + 0.5,
                 fillcolor="rgba(255,179,64,0.07)", line_width=0, layer="below",
             )
-        # End-of-line labels for the lines that finish inside the plot, spread
-        # apart where cars finished close together (spread_labels works on a
-        # 0..span scale, hence the shift by the bottom of the range).
-        labelled = [d for d in order if d in gaps and low <= gaps[d][1][-1] <= high]
+        # End labels, spread where cars finished close together. On this
+        # reversed axis "height" is CAP minus the gap.
+        labelled = [d for d in order if d in gaps and gaps[d][1][-1] <= CAP]
         offsets = dict(zip(labelled, spread_labels(
-            [gaps[d][1][-1] - low for d in labelled], plot_height_px=520 - 16 - 44, value_span=high - low,
+            [CAP - gaps[d][1][-1] for d in labelled], plot_height_px=480 - 16 - 44, value_span=CAP + 1.5,
         )))
-        for rank, driver in enumerate(order):
+        for rank, driver in reversed(list(enumerate(order))):  # the winner drawn last, on top
             if driver not in gaps:
                 continue
             x, y = gaps[driver]
@@ -2796,9 +2770,10 @@ def render_race_trace():
             podium = rank < 3
             fig.add_trace(go.Scatter(
                 x=x, y=y, mode="lines",
-                line=dict(color=color, width=3 if podium else 1.6),
-                opacity=1.0 if podium else 0.75,
-                text=[f"{driver} · lap {int(n)}: {g:+.1f} s" for n, g in zip(x, y)],
+                line=dict(color=color, width=3 if podium else 1.7, shape="spline", smoothing=0.4),
+                opacity=1.0 if podium else 0.8,
+                text=[f"{driver} · lap {int(n)}: +{g:.1f} s" if g > 0.05 else f"{driver} · lap {int(n)}: leading"
+                      for n, g in zip(x, y)],
                 hovertemplate="%{text}<extra></extra>",
             ))
             if driver in offsets:
@@ -2809,15 +2784,12 @@ def render_race_trace():
                 )
         st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
     method_note(
-        f"The reference is a car lapping steadily at the winner's average race pace "
-        f"({reference:.3f} s a lap). Each point is how far ahead of (up) or behind (down) that "
-        "imaginary car a driver was at the end of the lap, from the official timing. A pit stop "
-        "is a step down of about the time lost in the lane; a line climbing faster than the ones "
-        "around it is a driver on the quicker pace at that point of the race. Time spent stopped "
-        "under a red flag is taken out for everyone"
-        + (f" ({sum(s1 - s0 for s0, s1 in stoppages) / 60:.0f} min in this race)" if stoppages else "")
-        + ".",
-        "How the race trace is built",
+        "At the end of every lap, each driver's gap is how long after the leader of that lap they "
+        "crossed the line, from the official timing. The leader sits on zero; a line going down is "
+        "a driver losing time to the front. A pit stop is a spike of about the time lost in the "
+        "lane that comes back as the others stop too -- an undercut shows as a line that comes back "
+        "higher than it left. Only the top ten finishers are drawn, and the scale stops at 60 s.",
+        "How the gap is measured",
     )
     st.write("")
 

@@ -65,7 +65,7 @@ any local run — none of this is used.
   - *Race weekend* opens on a headline strip — winner, fastest lap, speed trap, biggest mover —
     over three tabs in the order a weekend is actually read: **Results** (classification with a
     places-gained column, plus every driver's position lap by lap with the podium band shaded),
-    **Race pace** (a race trace of every driver's gap to the winner's average pace, tyre
+    **Race pace** (every top-ten finisher's gap to the leader lap by lap, tyre
     strategy, pit lane time per stop by team, a two-driver head-to-head of every lap time with
     the compound on the marker and the cumulative gap under it, overtakes, race-pace spread as a box per driver, and fuel-corrected
     tyre degradation; in a qualifying session this tab is **Stats** instead: gap to pole, time
