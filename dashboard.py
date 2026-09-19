@@ -579,6 +579,28 @@ st.markdown(
     .tm-bar i { display: block; height: 100%; }
     .tm-gap { font-family: var(--mono); font-size: 0.82rem; color: var(--ink-dim); white-space: nowrap; }
 
+    /* ------------------------------------------------------- pit stop list */
+    /* DHL's stationary times, as a ranked list: the time is the thing to
+       read, so it's the biggest element on the row. */
+    .pit-list { display: flex; flex-direction: column; }
+    .pit-row {
+        display: grid; grid-template-columns: 2.6rem 5.2rem 4px 1fr auto; align-items: center;
+        gap: 0.8rem; padding: 0.55rem 0.2rem; border-top: 1px solid var(--line);
+    }
+    .pit-row:first-child { border-top: none; }
+    .pit-rank { font-family: var(--mono); font-size: 0.82rem; color: var(--ink-faint); text-align: right; }
+    .pit-time { font-family: var(--mono); font-size: 1.25rem; font-weight: 700; color: var(--ink); }
+    .pit-time small { font-size: 0.75rem; font-weight: 400; color: var(--ink-faint); margin-left: 2px; }
+    .pit-bar { width: 4px; height: 1.6rem; border-radius: 2px; }
+    .pit-who { min-width: 0; }
+    .pit-who b { font-family: var(--display); letter-spacing: 0.02em; white-space: nowrap; }
+    .pit-who span { display: block; font-size: 0.8rem; color: var(--ink-faint); }
+    .pit-extra { font-size: 0.8rem; color: var(--ink-dim); text-align: right; white-space: nowrap;
+                 max-width: 14rem; overflow: hidden; text-overflow: ellipsis; }
+    .pit-row.best .pit-time { color: var(--f1-amber); }
+    .pit-source { font-size: 0.78rem; color: var(--ink-faint); margin-top: 0.4rem; }
+    .pit-source a { color: var(--ink-dim); }
+
     /* ------------------------------------------------------- driver cards */
     .driver-card {
         position: relative; overflow: hidden;
@@ -980,6 +1002,81 @@ def teammate_battles(year, event_names):
                     "AAhead": ra["Position"] < rb["Position"], "Gap": gap,
                 })
     return pd.DataFrame(rows)
+
+
+# ------------------------------------------------------------- DHL pit stops
+# Stationary pit stop times -- the 2-second numbers -- aren't in the timing
+# feed or in Ergast; they're published by DHL for its Fastest Pit Stop Award.
+# Its pages load three public JSON feeds (the per-race ranking, the award
+# standings plus the season's fastest stops, and team averages per race),
+# and robots.txt only disallows /admin/. Seasons from 2023 have their own
+# page; earlier ones redirect to the current season, which dhl_feeds()
+# detects. DHL answers datacenter IPs, so the hosted app reads it directly.
+DHL = "https://inmotion.dhl"
+DHL_HEADERS = {"User-Agent": "Mozilla/5.0 (pitwall-pc F1 dashboard)"}
+DHL_FIRST_SEASON = 2023
+
+
+def dhl_json(element_id, event=None):
+    response = requests.get(
+        f"{DHL}/api/f1-award-element-data/{element_id}",
+        params={"event": event} if event else None, headers=DHL_HEADERS, timeout=20,
+    )
+    response.raise_for_status()
+    return response.json()["data"]
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner="Fetching DHL's pit stop times...")
+def dhl_season(year):
+    """The season's DHL data -- events, award standings, fastest stops, and
+    the feed ids -- or None when DHL has nothing for that year."""
+    url = (f"{DHL}/en/formula-1/fastest-pit-stop-award" if year == datetime.date.today().year
+           else f"{DHL}/formula-1/fastest-pit-stop-award-{year}")
+    try:
+        html = requests.get(url, headers=DHL_HEADERS, timeout=20).text
+        feeds = re.findall(r'data-url="/api/f1-award-element-data/(\d+)"', html)[:3]
+        if len(feeds) < 3:
+            return None
+        events = dhl_json(feeds[2])["chart"]["events"]
+        # A season DHL has no page for redirects to the current one.
+        if not events or str(year) not in events[0]["title"]:
+            return None
+        summary = dhl_json(feeds[1])["chart"]
+    except Exception:
+        return None
+    for e in events:
+        e["day"] = e["date"]["date"][:10]
+    return {"feeds": feeds, "events": events, "standings": summary.get("standings", []),
+            "fastest": summary.get("season_fastest", [])}
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def dhl_event_stops(year, event_day):
+    """(DHL event, its ranked stops) for the race held on event_day
+    (YYYY-MM-DD) -- matched by date, which both calendars agree on, rather
+    than by name ("Spanish" vs "Madrid", sponsor names in DHL's titles)."""
+    season = dhl_season(year)
+    if not season:
+        return None, []
+    event = next((e for e in season["events"] if e["day"] == event_day), None)
+    if event is None:
+        return None, []
+    try:
+        stops = dhl_json(season["feeds"][0], event=event["id"]).get("chart") or []
+    except Exception:
+        return event, []
+    return event, sorted(stops, key=lambda r: r["duration"])
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def dhl_all_time_fastest():
+    """Every season's ten fastest stops since DHL's records start, pooled."""
+    rows = []
+    for season_year in range(DHL_FIRST_SEASON, datetime.date.today().year + 1):
+        season = dhl_season(season_year)
+        for r in (season or {}).get("fastest", []):
+            rows.append({**r, "year": season_year})
+    return sorted(rows, key=lambda r: r["duration"])
 
 
 @st.cache_data(ttl=86400, show_spinner="Pulling every result in F1 history for this one...")
@@ -2042,7 +2139,9 @@ elif section == SECTION_SEASON:
             f"\U0001F4CA round {int(event_row['RoundNumber'])}",
         ],
     )
-    tab_standings, tab_season_stats, tab_teammates = st.tabs(["Championship", "Race by race", "Teammates"])
+    tab_standings, tab_season_stats, tab_teammates, tab_pits = st.tabs(
+        ["Championship", "Race by race", "Teammates", "Pit stops"]
+    )
 else:
     render_hero(
         "1950 — today", "World championship",
@@ -2842,85 +2941,81 @@ def render_quali_stats():
     )
 
 
+def dhl_team_color(team):
+    """DHL's team names are short ("Red Bull", "Haas") and include past
+    teams; FastF1 matches loosely, and anything it can't place goes grey."""
+    try:
+        return fastf1.plotting.get_team_color(team, session)
+    except Exception:
+        return "#999999"
+
+
+def pit_list(rows, best_duration=None):
+    """rows: dicts with duration, name, team, an 'extra' string and, where
+    the list isn't a ranking, a 'rank' label to show instead of 1, 2, 3."""
+    items = []
+    for i, r in enumerate(rows, start=1):
+        best = best_duration is not None and abs(r["duration"] - best_duration) < 1e-9
+        items.append(
+            f'<div class="pit-row{" best" if best else ""}">'
+            f'<div class="pit-rank">{r.get("rank", i)}</div>'
+            f'<div class="pit-time">{r["duration"]:.2f}<small>s</small></div>'
+            f'<div class="pit-bar" style="background:{dhl_team_color(r["team"])}"></div>'
+            f'<div class="pit-who"><b>{r["name"]}</b><span>{r["team"]}</span></div>'
+            f'<div class="pit-extra">{r.get("extra", "")}</div></div>'
+        )
+    st.markdown(f'<div class="pit-list">{"".join(items)}</div>', unsafe_allow_html=True)
+
+
+DHL_SOURCE = (
+    '<div class="pit-source">Stationary time, from the car stopping to it moving off -- published by '
+    f'<a href="{DHL}/en/formula-1/fastest-pit-stop-award" target="_blank">DHL for its Fastest Pit Stop '
+    "Award</a>. Records since 2023, the first season DHL still publishes.</div>"
+)
+
+
+def pit_record_cards(this_event=None):
+    """Fastest stop here (if given), this season's and the all-time one."""
+    cards = []
+    if this_event:
+        r = this_event
+        cards.append(("Fastest stop here", f"{r['duration']:.2f} s",
+                      f"{r['tla']} · {r['team']} · lap {r['lap']}", dhl_team_color(r["team"])))
+    season = dhl_season(year)
+    if season and season["fastest"]:
+        r = min(season["fastest"], key=lambda x: x["duration"])
+        cards.append((f"{year} season record", f"{r['duration']:.2f} s",
+                      f"{r['firstName'][0]}. {r['lastName']} · {r['shortTitle']}", dhl_team_color(r["team"])))
+    everything = dhl_all_time_fastest()
+    if everything:
+        r = everything[0]
+        cards.append(("All-time record", f"{r['duration']:.2f} s",
+                      f"{r['firstName'][0]}. {r['lastName']} · {r['team']} · {r['year']}", PALETTE["amber"]))
+    stat_cards(cards)
+
+
 def render_pit_stops():
-    """Time spent in the pit lane at every stop, by team: entry line to exit
-    line, which is what a stop actually costs in the race. FastF1 has no
-    stationary time, so a slow wheel change and a slow pit lane read alike;
-    the note says so."""
-    # Race-like sessions only: in practice a trip down the lane is a run
-    # ending in the garage, not a stop.
-    if session.laps["Position"].isna().all():
+    """The race's fastest stops by stationary time (DHL), with the season's
+    and the all-time record beside the winner. Replaced a chart of pit lane
+    times by team -- the only pit data in the timing feed, entry line to exit
+    line, 20-odd seconds that mostly measure the length of the lane."""
+    if session_name != "Race" or year < DHL_FIRST_SEASON:
         return
-    laps = session.laps.sort_values(["Driver", "LapNumber"])
-    team_of = session.results.set_index("Abbreviation")["TeamName"].to_dict()
-    stops = []
-    for driver, d in laps.groupby("Driver"):
-        d = d.set_index("LapNumber")
-        for lap_number, row in d.iterrows():
-            if pd.isna(row["PitInTime"]) or (lap_number + 1) not in d.index:
-                continue
-            out = d.loc[lap_number + 1, "PitOutTime"]
-            if pd.isna(out):
-                continue
-            seconds = (out - row["PitInTime"]).total_seconds()
-            # Under 10 s isn't a stop through the lane; over 60 s is a red
-            # flag or a repair in the garage, not a pit stop.
-            if 10 < seconds < 60:
-                stops.append({"Team": team_of.get(driver, "?"), "Driver": driver,
-                              "Lap": int(lap_number), "Seconds": seconds})
+    event, stops = dhl_event_stops(year, pd.Timestamp(event_row["EventDate"]).strftime("%Y-%m-%d"))
     if not stops:
         return
-    stops = pd.DataFrame(stops)
-    medians = stops.groupby("Team")["Seconds"].median().sort_values()
-    teams = list(reversed(medians.index))  # quickest at the top
-
-    def team_color(name):
-        try:
-            return fastf1.plotting.get_team_color(name, session)
-        except Exception:
-            return "#999999"
-
-    with chart_panel(
-        "Pit lane time by team",
-        "Every stop, entry to exit · the tick is each team's median, quickest at the top",
-        accent=PALETTE["amber"],
-    ):
-        # Dots and a median tick, not bars: the times all sit between about
-        # 20 and 45 s, so the axis can't start at zero without squashing the
-        # differences into a sliver -- and a bar on an axis that doesn't start
-        # at zero draws lengths that mean nothing.
-        fig = base_figure("", "", "Seconds in the pit lane", hovermode="closest")
-        fig.update_layout(height=max(260, 34 * len(teams) + 90), showlegend=False, margin=dict(r=70))
-        fig.update_yaxes(categoryorder="array", categoryarray=teams, tickfont=dict(size=11))
-        fig.add_trace(go.Scatter(
-            x=[medians[t] for t in teams], y=teams, mode="markers",
-            marker=dict(symbol="line-ns", size=24, line=dict(width=3, color=[team_color(t) for t in teams])),
-            hovertemplate="%{y}: median %{x:.1f} s<extra></extra>",
-        ))
-        fig.add_trace(go.Scatter(
-            x=stops["Seconds"], y=stops["Team"], mode="markers",
-            marker=dict(size=9, color=[hex_to_rgba(team_color(t), 0.55) for t in stops["Team"]],
-                        line=dict(color=[team_color(t) for t in stops["Team"]], width=1.5)),
-            text=[f"{r.Driver} · lap {r.Lap}: {r.Seconds:.1f} s" for r in stops.itertuples()],
-            hovertemplate="%{text}<extra></extra>",
-        ))
-        right = stops["Seconds"].max() + 2
-        fig.update_xaxes(range=[stops["Seconds"].min() - 2, right])
-        # The median as a figure, in a column of its own past the last stop.
-        for t in teams:
-            fig.add_annotation(
-                x=right, y=t, xanchor="left", xshift=10, showarrow=False, text=f"{medians[t]:.1f} s",
-                font=dict(size=11, color="rgba(226,232,240,0.8)"),
-            )
-        st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
-    method_note(
-        "Time from the pit entry line to the exit line, from the official timing, for each stop "
-        "that took between 10 and 60 seconds (shorter isn't a stop through the lane; longer is a "
-        "red flag or a repair). It includes the drive down the speed-limited lane, so it varies "
-        "from track to track, and it can't tell a slow wheel change from a slow lane: FastF1 has "
-        "no stationary time. A drive-through or stop-and-go penalty looks like a stop too.",
-        "What counts as pit lane time",
-    )
+    section_head("Pit stops", "DHL stationary times", "", accent=PALETTE["amber"])
+    pit_record_cards(stops[0])
+    st.write("")
+    with chart_panel("Fastest stops of the race", "Ranked by stationary time · DHL award points on the right",
+                     accent=PALETTE["amber"]):
+        pit_list(
+            [{"duration": r["duration"], "name": f"{r['firstName']} {r['lastName']}", "team": r["team"],
+              "extra": f"lap {r['lap']} · {r['points']} pts" + (" · irregular" if r.get("irregular") else "")}
+             for r in stops[:10]],
+            best_duration=stops[0]["duration"],
+        )
+        st.markdown(DHL_SOURCE, unsafe_allow_html=True)
     st.write("")
 
 
@@ -4651,6 +4746,72 @@ if section == SECTION_SEASON:
                         ))
                     fig.update_xaxes(tickangle=-45, tickfont=dict(size=10))
                     st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+
+# ------------------------------------------------------------ pit stops --
+
+if section == SECTION_SEASON:
+    with tab_pits:
+        section_head(
+            "Pit stops",
+            f"{year} season · DHL stationary times",
+            "The fastest stops of the year, the fastest at every Grand Prix, and the fastest DHL has "
+            "ever timed.",
+            accent=PALETTE["amber"],
+        )
+        season_dhl = dhl_season(year) if year >= DHL_FIRST_SEASON else None
+        if not season_dhl:
+            empty_state(f"DHL has no pit stop times for {year} (its records start in {DHL_FIRST_SEASON})")
+        else:
+            pit_record_cards()
+            st.write("")
+            today = datetime.date.today().isoformat()
+            run = [e for e in season_dhl["events"] if e["day"] <= today]
+            winners = []
+            for e in run:
+                _, stops = dhl_event_stops(year, e["day"])
+                if stops:
+                    winners.append((e, stops[0]))
+            season_best = min((w["duration"] for _, w in winners), default=None)
+
+            col_gp, col_side = st.columns([3, 2])
+            with col_gp:
+                with chart_panel("Fastest stop at every Grand Prix", "In calendar order · the season's quickest highlighted",
+                                 accent=PALETTE["amber"]):
+                    pit_list(
+                        [{"duration": w["duration"], "name": f"{w['firstName'][0]}. {w['lastName']}",
+                          "team": w["team"], "extra": e["short_title"], "rank": e["abbr"]}
+                         for e, w in winners],
+                        best_duration=season_best,
+                    )
+            with col_side:
+                with chart_panel(f"Fastest of {year}", "The ten quickest stops of the season", accent=PALETTE["amber"]):
+                    pit_list([{"duration": r["duration"], "name": f"{r['firstName'][0]}. {r['lastName']}",
+                               "team": r["team"], "extra": r["abbreviation"]}
+                              for r in sorted(season_dhl["fastest"], key=lambda x: x["duration"])[:10]])
+                st.write("")
+                with chart_panel("Fastest ever", f"Since {DHL_FIRST_SEASON}, all seasons pooled", accent=PALETTE["amber"]):
+                    pit_list([{"duration": r["duration"], "name": f"{r['firstName'][0]}. {r['lastName']}",
+                               "team": r["team"], "extra": f"{r['abbreviation']} {r['year']}"}
+                              for r in dhl_all_time_fastest()[:10]])
+            st.write("")
+            if season_dhl["standings"]:
+                with chart_panel("DHL Fastest Pit Stop Award", "Team standings · points for the ten quickest stops of every race",
+                                 accent=PALETTE["amber"]):
+                    standings = season_dhl["standings"]
+                    fig = base_figure("", "", "Award points", hovermode="closest")
+                    fig.update_layout(showlegend=False)
+                    teams = [r["team"] for r in standings][::-1]
+                    points = [r["points"] for r in standings][::-1]
+                    fig.add_trace(go.Bar(
+                        x=points, y=teams, orientation="h",
+                        marker=dict(color=[dhl_team_color(t) for t in teams]),
+                        text=points, textposition="outside", cliponaxis=False,
+                        hovertemplate="%{y}: %{x} points<extra></extra>",
+                    ))
+                    size_horizontal_bars(fig, points)
+                    style_bars(fig)
+                    st.plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+            st.markdown(DHL_SOURCE, unsafe_allow_html=True)
 
 # ------------------------------------------------------------ all-time --
 

@@ -65,7 +65,7 @@ any local run — none of this is used.
   - *Race weekend* opens on a headline strip — winner, fastest lap, speed trap, biggest mover —
     over three tabs in the order a weekend is actually read: **Results** (classification with a
     places-gained column, plus every driver's position lap by lap with the podium band shaded),
-    **Race pace** (tyre strategy, pit lane time per stop by team, a two-driver head-to-head of every lap time with
+    **Race pace** (tyre strategy, the race's ten fastest pit stops by stationary time (DHL) beside the season and all-time records, a two-driver head-to-head of every lap time with
     the compound on the marker and the cumulative gap under it, overtakes, race-pace spread as a box per driver, and fuel-corrected
     tyre degradation; in a qualifying session this tab is **Stats** instead: gap to pole, time
     lost against each driver's ideal lap, each team's top speed against its average corner
@@ -83,7 +83,9 @@ any local run — none of this is used.
     race** (season records, a points-per-race heatmap of every scoring driver against every
     round, and overtakes by race and by driver) and **Teammates** (every pairing's qualifying,
     race and points head-to-head with the median qualifying gap, then one pairing race by race:
-    qualifying gap and both finishing positions).
+    qualifying gap and both finishing positions) and **Pit stops** (DHL stationary times: the
+    fastest stop at every Grand Prix, the season's and the all-time top ten since 2023, and the
+    DHL award standings).
   - *All-time records* ranks wins, poles, constructor wins, single-season wins, winning streaks
     and pole-to-win conversion across every championship race since 1950.
 
