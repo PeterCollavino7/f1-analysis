@@ -65,8 +65,7 @@ any local run — none of this is used.
   - *Race weekend* opens on a headline strip — winner, fastest lap, speed trap, biggest mover —
     over three tabs in the order a weekend is actually read: **Results** (classification with a
     places-gained column, plus every driver's position lap by lap with the podium band shaded),
-    **Race pace** (every top-ten finisher's gap to the leader lap by lap, tyre
-    strategy, pit lane time per stop by team, a two-driver head-to-head of every lap time with
+    **Race pace** (tyre strategy, pit lane time per stop by team, a two-driver head-to-head of every lap time with
     the compound on the marker and the cumulative gap under it, overtakes, race-pace spread as a box per driver, and fuel-corrected
     tyre degradation; in a qualifying session this tab is **Stats** instead: gap to pole, time
     lost against each driver's ideal lap, each team's top speed against its average corner
@@ -82,8 +81,9 @@ any local run — none of this is used.
   - *Season* has **Championship** (both standings tables, points progression with the leader's
     line filled, Monte-Carlo title odds as donuts, and a clinch-round estimate) and **Race by
     race** (season records, a points-per-race heatmap of every scoring driver against every
-    round, and overtakes by race and by driver) and **Teammates** (who finished ahead of whom
-    in every qualifying and race, with the median qualifying gap).
+    round, and overtakes by race and by driver) and **Teammates** (every pairing's qualifying,
+    race and points head-to-head with the median qualifying gap, then one pairing race by race:
+    qualifying gap and both finishing positions).
   - *All-time records* ranks wins, poles, constructor wins, single-season wins, winning streaks
     and pole-to-win conversion across every championship race since 1950.
 
