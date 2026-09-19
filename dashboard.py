@@ -96,7 +96,7 @@ def plotly_chart(fig, **kwargs):
 # Bumped whenever detect_passes() changes: it's an argument of season_stats(),
 # so a new counting rule can't be served from a day-old cache of the old one
 # (a code push doesn't clear Streamlit's cache on the hosted app).
-OVERTAKE_RULES = 2
+OVERTAKE_RULES = 3
 MIN_LAPS_FOR_TREND = 10  # per compound, for the pooled fuel-correction fit
 MIN_LAPS_PER_DRIVER = 6  # per driver+compound, for the per-driver breakdown
 TRACK_SECTOR_COUNT = 20  # mini-sectors for the track dominance map, not the official S1/S2/S3
@@ -1835,7 +1835,12 @@ def build_driver_styles(drivers, session):
 
 
 NEUTRALISED = set("4567")  # safety car, red flag, VSC deployed, VSC ending
-SLOW_LAP = 1.05  # a lap this much slower than the field's, same lap, is an incident
+SLOW_LAP = 1.06  # a lap this much slower than the field's, same lap, is an incident
+OPENING_LAPS = 4  # the field still sorting itself out after the start
+# The rule set was checked against published per-race totals: Spain 2026 had
+# 4 overtakes and Monaco 2026 had 10, and these rules give exactly those, move
+# for move. Lap 1 alone, or no own-out-lap rule, gave 11 in Spain; a 5% slow
+# threshold dropped LIN on ALB at Monaco (ALB 5.1% off the field that lap).
 
 
 def detect_passes(session):
@@ -1860,7 +1865,12 @@ def detect_passes(session):
       chronological, so one that *ends* in safety car / VSC / red flag is
       neutralised, while one that starts under the safety car and ends green
       is a restart -- and restart passes are real ones;
-    - lap 1 and the first lap after a red flag: those are starts;
+    - the opening laps (OPENING_LAPS) and the lap after a red flag: the
+      field sorting itself out after a start, not passing;
+    - the passer's first lap after its own pit stop: fresh tyres against
+      old, an undercut completing, which published counts leave out --
+      unless that lap is a restart (a stop made under the safety car, then
+      a pass at the green flag is a real one);
     - a pass race control made the driver hand back ("advantage" / "give
       back"): both the pass and the handing back are dropped.
 
@@ -1881,7 +1891,7 @@ def detect_passes(session):
 
     # Laps that are starts: lap 1, and the first lap after one with a red flag.
     red_laps = set(laps.loc[laps["Status"].str.contains("5"), "LapNumber"].astype(int))
-    start_laps = {1} | {n + 1 for n in red_laps}
+    start_laps = set(range(1, OPENING_LAPS + 1)) | {n + 1 for n in red_laps}
 
     # Race control telling a driver to give a place back.
     handed_back = set()
@@ -1905,8 +1915,12 @@ def detect_passes(session):
         leader = cur["Position"].idxmin()
         if cur.loc[leader, "Status"][-1] in NEUTRALISED:
             continue
+        # Started under a safety car or red flag, ended green: a restart.
+        restart = any(ch in cur.loc[leader, "Status"][:-1] for ch in "45")
         for a in cur.index:
             if a not in prev.index or cur.loc[a, "Pitting"]:
+                continue
+            if prev.loc[a, "Pitting"] and not restart:
                 continue
             for b in cur.index:
                 if b == a or b not in prev.index or cur.loc[b, "Pitting"]:
@@ -3349,10 +3363,12 @@ def render_overtakes():
             "Each overtake is one car getting ahead of another between two crossings of the "
             "line, found pair by pair in the official lap-end positions -- so three cars passed "
             "in one lap are three overtakes. Not counted: moves where either car was in the pit "
-            "lane that lap; a car that retired, or had a problem (a lap more than 5% slower than "
-            "the rest of the field on that same lap: a spin, damage, a failure); laps that end under the safety car, VSC or "
-            "a red flag (restart laps do count); lap 1 and the lap after a red flag, which are "
-            "starts; and a place race control made the driver give back, together with the "
+            "lane that lap; a pass made on the passer's first lap after its own pit stop (fresh "
+            "tyres completing an undercut -- except at a restart); a car that retired, or had a "
+            "problem (a lap more than 6% slower than the rest of the field on that same lap: a "
+            "spin, damage, a failure); laps that end under the safety car, VSC or a red flag "
+            "(restart laps do count); the first four laps and the lap after a red flag, while "
+            "the field sorts itself out after a start; and a place race control made the driver give back, together with the "
             "handing back. Lapping doesn't change race order, so it never counts. The one blind "
             "spot: a pass and a re-pass within the same lap, since positions only exist at the line.",
             "How an overtake is counted here",
