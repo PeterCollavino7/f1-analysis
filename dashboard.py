@@ -96,7 +96,7 @@ def plotly_chart(fig, **kwargs):
 # Bumped whenever detect_passes() changes: it's an argument of season_stats(),
 # so a new counting rule can't be served from a day-old cache of the old one
 # (a code push doesn't clear Streamlit's cache on the hosted app).
-OVERTAKE_RULES = 3
+OVERTAKE_RULES = 5
 MIN_LAPS_FOR_TREND = 10  # per compound, for the pooled fuel-correction fit
 MIN_LAPS_PER_DRIVER = 6  # per driver+compound, for the per-driver breakdown
 TRACK_SECTOR_COUNT = 20  # mini-sectors for the track dominance map, not the official S1/S2/S3
@@ -1865,8 +1865,8 @@ def detect_passes(session):
       chronological, so one that *ends* in safety car / VSC / red flag is
       neutralised, while one that starts under the safety car and ends green
       is a restart -- and restart passes are real ones;
-    - the opening laps (OPENING_LAPS) and the lap after a red flag: the
-      field sorting itself out after a start, not passing;
+    - the opening laps (OPENING_LAPS), after the start and after a red-flag
+      restart: the field sorting itself out, not passing;
     - the passer's first lap after its own pit stop: fresh tyres against
       old, an undercut completing, which published counts leave out --
       unless that lap is a restart (a stop made under the safety car, then
@@ -1891,7 +1891,22 @@ def detect_passes(session):
 
     # Laps that are starts: lap 1, and the first lap after one with a red flag.
     red_laps = set(laps.loc[laps["Status"].str.contains("5"), "LapNumber"].astype(int))
-    start_laps = set(range(1, OPENING_LAPS + 1)) | {n + 1 for n in red_laps}
+    # A red-flag restart is a start too (a standing one since 2021), so the
+    # same opening laps after it are left out: Monza 2026, stopped on laps
+    # 2-3, otherwise scored 21 "overtakes" on lap 6 as the field resorted.
+    start_laps = set(range(1, OPENING_LAPS + 1))
+    # Only a standing restart, though: Monaco 2026, stopped on lap 67,
+    # restarted behind the safety car, and the passes at the green flag there
+    # are real ones (and part of its published 10). Rolling restart = the
+    # leader's first laps after the stoppage include safety-car running.
+    if red_laps:
+        restart = max(red_laps)
+        leader_status = (
+            laps[laps["Position"] == 1].drop_duplicates("LapNumber").set_index("LapNumber")["Status"]
+        )
+        after = "".join(str(leader_status.get(n, "")) for n in (restart + 1, restart + 2))
+        if "4" not in after:
+            start_laps |= set(range(restart + 1, restart + 1 + OPENING_LAPS))
 
     # Race control telling a driver to give a place back.
     handed_back = set()
@@ -4528,7 +4543,7 @@ if section == SECTION_SEASON:
             "(each race's full session is fetched once), instant after that.",
             accent=PALETTE["teal"],
         )
-        stats_df, driver_overtakes = season_stats(year, tuple(schedule["EventName"].tolist()))
+        stats_df, driver_overtakes = season_stats(year, tuple(schedule["EventName"].tolist()), OVERTAKE_RULES)
 
         if stats_df.empty:
             empty_state("No completed races to compute stats from yet")
