@@ -554,19 +554,28 @@ st.markdown(
        its two counts outside it, so nothing has to fit inside a sliver of
        bar or share a line with a label (the chart version it replaced
        overprinted both at anything below full width). */
-    .tm-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    /* Fixed layout with proportional columns: with a min-width on every
+       split bar, the table outgrew its panel on anything narrower than a
+       wide desktop and the last column hung over the edge. The wrapper
+       scrolls sideways instead on a phone. */
+    .tm-scroll { width: 100%; overflow-x: auto; }
+    .tm-table { width: 100%; min-width: 640px; table-layout: fixed; border-collapse: collapse; font-size: 0.9rem; }
+    .tm-table col.c-team { width: 15%; }
+    .tm-table col.c-pair { width: 14%; }
+    .tm-table col.c-split { width: 19%; }
+    .tm-table col.c-gap { width: 14%; }
     .tm-table th {
         text-align: left; font-weight: 600; font-size: 0.72rem; letter-spacing: 0.08em;
         text-transform: uppercase; color: var(--ink-faint); padding: 0 10px 8px;
     }
-    .tm-table td { padding: 9px 10px; border-top: 1px solid var(--line); vertical-align: middle; }
-    .tm-team { display: flex; align-items: center; gap: 9px; color: var(--ink-dim); white-space: nowrap; }
+    .tm-table td { padding: 9px 10px; border-top: 1px solid var(--line); vertical-align: middle; overflow: hidden; }
+    .tm-team { display: flex; align-items: center; gap: 9px; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tm-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
     .tm-pair { font-family: var(--display); font-weight: 700; letter-spacing: 0.04em; white-space: nowrap; }
     .tm-pair span { color: var(--ink-faint); font-weight: 400; margin: 0 5px; }
-    .tm-split { display: flex; align-items: center; gap: 8px; min-width: 150px; }
+    .tm-split { display: flex; align-items: center; gap: 6px; min-width: 0; }
     .tm-split b { min-width: 2.2em; text-align: center; white-space: nowrap; font-family: var(--mono); font-weight: 500; }
-    .tm-bar { flex: 1; display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--line); }
+    .tm-bar { flex: 1; min-width: 24px; display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--line); }
     .tm-bar i { display: block; height: 100%; }
     .tm-gap { font-family: var(--mono); font-size: 0.82rem; color: var(--ink-dim); white-space: nowrap; }
 
@@ -4486,9 +4495,12 @@ if section == SECTION_SEASON:
                 accent=PALETTE["violet"],
             ):
                 st.markdown(
-                    '<table class="tm-table"><thead><tr><th>Team</th><th>Pair</th>'
-                    "<th>Qualifying</th><th>Race</th><th>Points</th><th>Median quali gap</th></tr></thead>"
-                    f"<tbody>{''.join(body)}</tbody></table>",
+                    '<div class="tm-scroll"><table class="tm-table">'
+                    '<colgroup><col class="c-team"><col class="c-pair"><col class="c-split">'
+                    '<col class="c-split"><col class="c-split"><col class="c-gap"></colgroup>'
+                    "<thead><tr><th>Team</th><th>Pair</th><th>Qualifying</th><th>Race</th>"
+                    "<th>Points</th><th>Quali gap</th></tr></thead>"
+                    f"<tbody>{''.join(body)}</tbody></table></div>",
                     unsafe_allow_html=True,
                 )
             method_note(
