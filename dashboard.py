@@ -255,71 +255,128 @@ st.markdown(
     [data-testid="stAppDeployButton"] { display: none; }
 
     /* ------------------------------------------------------------ sidebar */
-    /* Restyled with background, border, spacing and typography only --
-       nothing here hides a Streamlit element, because the internal DOM
-       isn't ours and a selector that stops matching after an upgrade would
-       silently take a control with it. If a rule below misses, the control
-       still renders, just unstyled. */
+    /* Restyled with background, border, spacing and typography, selected by
+       test id and ARIA attributes. The one thing hidden is the radio dot on
+       the navigation, which is decoration (the row itself is the control);
+       if that selector ever stops matching, the dot simply comes back. */
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #151a26 0%, #0c0f18 100%);
+        background:
+            radial-gradient(130% 35% at 0% 0%, rgba(225, 6, 0, 0.10) 0%, transparent 70%),
+            linear-gradient(180deg, #131824 0%, #0b0e16 100%);
         border-right: 1px solid var(--line);
     }
-    [data-testid="stSidebar"] label {
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        font-size: 0.66rem;
-        font-weight: 700;
-        color: var(--ink-faint);
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0.75rem; }
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
+        text-transform: uppercase; letter-spacing: 0.13em;
+        font-size: 0.6rem; font-weight: 700; color: var(--ink-faint);
     }
-    /* The section picker reads as a nav rather than a form control: each
-       option gets its own row, and the chosen one carries the accent. */
-    [data-testid="stSidebar"] [role="radiogroup"] > label {
+
+    /* Navigation: full-width rows with an icon, a name and one line on
+       what's there. The icons are masks filled with the text color, so the
+       chosen row's icon turns red with it. */
+    [data-testid="stSidebar"] [data-testid="stElementContainer"]:has(> [data-testid="stRadio"]),
+    [data-testid="stSidebar"] [data-testid="stRadio"],
+    [data-testid="stSidebar"] [role="radiogroup"] { width: 100% !important; }
+    [data-testid="stSidebar"] [role="radiogroup"] { gap: 4px; }
+    [data-testid="stSidebar"] [data-testid="stRadioOption"] {
+        position: relative; width: 100%; margin: 0;
+        padding: 0.55rem 0.75rem 0.6rem 2.85rem;
+        border-radius: 12px; border: 1px solid transparent;
+        text-transform: none; letter-spacing: normal;
+        transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    [data-testid="stSidebar"] [data-testid="stRadioOption"] > div > div > div:first-child:not([data-testid]) {
+        display: none;
+    }
+    [data-testid="stSidebar"] [data-testid="stRadioOption"]::before {
+        content: ""; position: absolute; left: 0.85rem; top: 0.72rem; width: 19px; height: 19px;
+        background: var(--ink-faint);
+        -webkit-mask: var(--icon) center / contain no-repeat; mask: var(--icon) center / contain no-repeat;
+        transition: background 0.15s ease;
+    }
+    [data-testid="stSidebar"] [data-testid="stRadioOption"]:nth-of-type(1) {
+        --icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M5 21V4'/><path d='M5 4h13l-2.5 4.5L18 13H5'/></svg>");
+    }
+    [data-testid="stSidebar"] [data-testid="stRadioOption"]:nth-of-type(2) {
+        --icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M3 20h18'/><path d='M6 20v-6'/><path d='M11 20V8'/><path d='M16 20v-9'/><path d='M21 20V4'/></svg>");
+    }
+    [data-testid="stSidebar"] [data-testid="stRadioOption"]:nth-of-type(3) {
+        --icon: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M8 21h8'/><path d='M12 17v4'/><path d='M7 4h10v5a5 5 0 0 1-10 0z'/><path d='M17 6h3v1.5A3.5 3.5 0 0 1 16.5 11'/><path d='M7 6H4v1.5A3.5 3.5 0 0 0 7.5 11'/></svg>");
+    }
+    [data-testid="stSidebar"] [data-testid="stRadioOption"] [data-testid="stMarkdownContainer"] p {
+        margin: 0; font-size: 0.93rem; font-weight: 600; letter-spacing: 0.01em; color: var(--ink-dim);
         text-transform: none;
-        letter-spacing: 0.01em;
-        font-size: 0.95rem;
-        font-weight: 600;
-        color: var(--ink);
-        padding: 0.55rem 0.75rem;
-        margin-bottom: 0.3rem;
-        border-radius: 10px;
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        background: rgba(255, 255, 255, 0.02);
-        transition: background 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
     }
-    [data-testid="stSidebar"] [role="radiogroup"] > label:hover {
-        background: rgba(255, 255, 255, 0.06);
-        border-color: var(--line-strong);
-        transform: translateX(2px);
+    [data-testid="stSidebar"] [data-testid="stRadioOption"] [data-testid="stCaptionContainer"] p,
+    [data-testid="stSidebar"] [data-testid="stRadioOption"] [data-testid="stCaptionContainer"] {
+        margin: 0.05rem 0 0; font-size: 0.72rem; line-height: 1.35; color: var(--ink-faint);
+        text-transform: none; letter-spacing: normal; font-weight: 400;
     }
-    [data-testid="stSidebar"] [role="radiogroup"] > label:has(input:checked) {
-        background: linear-gradient(90deg, rgba(225, 6, 0, 0.22), rgba(225, 6, 0, 0.04));
-        border-color: rgba(225, 6, 0, 0.55);
+    [data-testid="stSidebar"] [data-testid="stRadioOption"]:hover { background: rgba(255, 255, 255, 0.045); }
+    [data-testid="stSidebar"] [data-testid="stRadioOption"]:hover::before { background: var(--ink-dim); }
+    [data-testid="stSidebar"] [data-testid="stRadioOption"]:hover [data-testid="stMarkdownContainer"] p { color: var(--ink); }
+    [data-testid="stSidebar"] [data-testid="stRadioOption"]:is([data-selected="true"], :has(input:checked)) {
+        background: linear-gradient(90deg, rgba(225, 6, 0, 0.20), rgba(225, 6, 0, 0.03) 80%);
+        border-color: rgba(225, 6, 0, 0.32);
         box-shadow: inset 3px 0 0 var(--f1-red);
     }
-    [data-testid="stSidebar"] [data-baseweb="select"] > div {
-        background: rgba(255, 255, 255, 0.04);
-        border-color: var(--line);
-        border-radius: 10px;
+    [data-testid="stSidebar"] [data-testid="stRadioOption"]:is([data-selected="true"], :has(input:checked))::before {
+        background: var(--f1-red);
     }
+    [data-testid="stSidebar"] [data-testid="stRadioOption"]:is([data-selected="true"], :has(input:checked)) [data-testid="stMarkdownContainer"] p {
+        color: #fff;
+    }
+
+    /* The Year / Grand Prix fields. react-aria draws them now (1.63), so the
+       old baseweb selector here matched nothing and they rendered stock. */
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] [role="group"] {
+        background: rgba(255, 255, 255, 0.045) !important;
+        border: 1px solid rgba(255, 255, 255, 0.10) !important;
+        border-radius: 10px !important;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] [role="group"]:hover { border-color: rgba(255, 255, 255, 0.24) !important; }
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] [role="group"]:focus-within {
+        border-color: rgba(225, 6, 0, 0.7) !important; box-shadow: 0 0 0 3px rgba(225, 6, 0, 0.16);
+    }
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] input { font-weight: 600; font-size: 0.9rem; min-width: 0; }
+    .data-status { padding-left: 0.2rem; }
+
+    /* Session buttons: one connected strip, the chosen one filled red. */
+    [data-testid="stSidebar"] [data-testid="stButtonGroup"] button {
+        min-height: 36px; padding: 0 0.2rem;
+        background: rgba(255, 255, 255, 0.03); border-color: rgba(255, 255, 255, 0.10);
+        transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    [data-testid="stSidebar"] [data-testid="stButtonGroup"] button p {
+        font-family: var(--display); font-weight: 700; font-size: 0.78rem; letter-spacing: 0.04em; color: var(--ink-dim);
+    }
+    [data-testid="stSidebar"] [data-testid="stButtonGroup"] button:hover { background: rgba(255, 255, 255, 0.07); }
+    [data-testid="stSidebar"] [data-testid="stButtonGroup"] button:is([aria-checked="true"], [aria-pressed="true"]) {
+        background: linear-gradient(180deg, #ef1a12, #c80500); border-color: #e10600;
+        box-shadow: 0 6px 16px -8px rgba(225, 6, 0, 0.9);
+    }
+    [data-testid="stSidebar"] [data-testid="stButtonGroup"] button:is([aria-checked="true"], [aria-pressed="true"]) p { color: #fff; }
+
     .sidebar-brand {
         display: flex;
         align-items: center;
-        gap: 0.65rem;
-        padding: 0.1rem 0 0.9rem;
-        margin-bottom: 0.5rem;
+        gap: 0.7rem;
+        padding: 0.1rem 0.15rem 1rem;
+        margin-bottom: 0.2rem;
         border-bottom: 1px solid var(--line);
     }
     .sidebar-brand .flag {
-        width: 24px; height: 24px; flex: 0 0 auto; border-radius: 5px;
+        width: 26px; height: 26px; flex: 0 0 auto; border-radius: 6px;
         background-image:
             linear-gradient(45deg, #e8ebef 25%, transparent 25%, transparent 75%, #e8ebef 75%),
             linear-gradient(45deg, #e8ebef 25%, #12151d 25%, #12151d 75%, #e8ebef 75%);
-        background-size: 12px 12px;
-        background-position: 0 0, 6px 6px;
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+        background-size: 13px 13px;
+        background-position: 0 0, 6.5px 6.5px;
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.12), 0 4px 14px rgba(0, 0, 0, 0.55);
     }
     .sidebar-brand .word {
-        font-size: 1.1rem; font-weight: 700; letter-spacing: 0.08em; color: #f2f4f6; line-height: 1.15;
+        font-size: 1.12rem; font-weight: 700; letter-spacing: 0.08em; color: #f2f4f6; line-height: 1.15;
     }
     .sidebar-brand .word em {
         font-style: italic; color: var(--f1-red); font-weight: 900; margin-right: 0.2rem;
@@ -331,14 +388,49 @@ st.markdown(
         display: block; font-size: 0.46rem; letter-spacing: 0.15em;
         color: var(--ink-faint); font-weight: 600; white-space: nowrap;
     }
-    .sidebar-foot {
-        margin-top: 1.5rem; padding-top: 0.9rem;
-        border-top: 1px solid var(--line);
-        font-size: 0.7rem; line-height: 1.7; color: var(--ink-faint);
+
+    /* What's next on the calendar, and how fresh the data is. */
+    .next-race {
+        position: relative; overflow: hidden; margin-top: 0.35rem;
+        padding: 0.75rem 0.85rem 0.8rem 1rem; border-radius: 12px;
+        border: 1px solid var(--line);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015));
     }
+    .next-race::before {
+        content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+        background: linear-gradient(180deg, var(--f1-red), rgba(225, 6, 0, 0.15));
+    }
+    .next-race .kicker {
+        display: flex; align-items: center; gap: 0.45rem;
+        font-size: 0.6rem; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
+        color: var(--ink-faint);
+    }
+    .next-race .kicker i { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-faint); flex: none; }
+    .next-race.live .kicker { color: #ff7a73; }
+    .next-race.live .kicker i { background: var(--f1-red); animation: live-pulse 1.8s ease-out infinite; }
+    @keyframes live-pulse {
+        0% { box-shadow: 0 0 0 0 rgba(225, 6, 0, 0.6); }
+        70% { box-shadow: 0 0 0 7px rgba(225, 6, 0, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(225, 6, 0, 0); }
+    }
+    @media (prefers-reduced-motion: reduce) { .next-race.live .kicker i { animation: none; } }
+    .next-race .name { margin-top: 0.3rem; font-size: 1rem; font-weight: 700; line-height: 1.2; color: #f4f6f8; }
+    .next-race .detail { margin-top: 0.2rem; font-size: 0.76rem; color: var(--ink-dim); }
+    .data-status {
+        display: flex; align-items: center; gap: 0.5rem; margin-top: 0.7rem;
+        font-size: 0.72rem; color: var(--ink-faint);
+    }
+    .data-status i {
+        width: 7px; height: 7px; border-radius: 50%; flex: none;
+        background: var(--f1-teal); box-shadow: 0 0 8px var(--f1-teal);
+    }
+    .data-status b { color: var(--ink-dim); font-weight: 600; }
+    .data-status.late { margin-top: 0.35rem; color: var(--f1-amber); }
+    .data-status.late i { background: var(--f1-amber); box-shadow: 0 0 8px var(--f1-amber); }
+    [data-testid="stSidebar"] [data-testid="stExpander"] { background: transparent; }
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary p { font-size: 0.74rem; }
+    .sidebar-foot { font-size: 0.72rem; line-height: 1.75; color: var(--ink-faint); }
     .sidebar-foot b { color: var(--ink-dim); font-weight: 600; }
-    .sidebar-foot .dim { opacity: 0.75; }
-    .sidebar-foot .late { color: var(--f1-amber); }
 
     /* --------------------------------------------------------------- hero */
     /* Stock photography of an F1 car would be someone else's copyright, so
@@ -1442,7 +1534,10 @@ def freshness_line():
     hours = age.total_seconds() / 3600
     ago = (f"{max(1, round(age.total_seconds() / 60))} min ago" if hours < 1
            else f"{hours:.0f} h ago" if hours < 36 else f"{age.days} days ago")
-    line = f'<b>Updated</b> · {ago} <span class="dim">({newest:%d %b, %H:%M} UTC)</span><br>'
+    line = (
+        f'<div class="data-status" title="{newest:%d %b %Y, %H:%M} UTC"><i></i>'
+        f"<span>Data updated <b>{ago}</b></span></div>"
+    )
 
     # A session is late when it started more than 32 hours ago -- two hours
     # to run, the six publish_data.py waits for the feed to settle, and a day
@@ -1461,8 +1556,69 @@ def freshness_line():
     except Exception:
         late = []
     if late:
-        line += f'<span class="late">Not published yet · {", ".join(late[-2:])}</span><br>'
+        line += f'<div class="data-status late"><i></i><span>Not published yet · {", ".join(late[-2:])}</span></div>'
     return line
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def season_calendar(year):
+    """The whole season's schedule, rounds not yet run included, as plain
+    rows: name, place, date and every session's start (UTC)."""
+    with FF1_LOCK:
+        schedule = fastf1.get_event_schedule(year)
+    rows = []
+    for _, e in schedule[schedule["RoundNumber"] > 0].iterrows():
+        sessions = [
+            (e[f"Session{i}"], e[f"Session{i}DateUtc"]) for i in range(1, 6)
+            if isinstance(e.get(f"Session{i}"), str) and e.get(f"Session{i}") and pd.notna(e.get(f"Session{i}DateUtc"))
+        ]
+        rows.append({"name": e["EventName"], "location": e["Location"], "round": int(e["RoundNumber"]),
+                     "date": pd.Timestamp(e["EventDate"]), "sessions": sessions})
+    return rows
+
+
+def until(delta):
+    """"in 40 min" / "in 22 h" / "in 5 days" -- relative, so no time zone to
+    get wrong for a reader anywhere."""
+    minutes = delta.total_seconds() / 60
+    if minutes < 60:
+        return f"in {max(1, round(minutes))} min"
+    if minutes < 48 * 60:
+        return f"in {minutes / 60:.0f} h"
+    return f"in {round(minutes / 1440)} days"
+
+
+def next_race_card():
+    """What's next on the calendar, at the top of the sidebar's foot: the
+    weekend that's on now and its next session, or the next Grand Prix and
+    how far away it is. Gives the page a sense of where the season is, and
+    of when the next data will land."""
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+    try:
+        calendar = season_calendar(now.year)
+    except Exception:
+        return ""
+    for event in calendar:
+        if not event["sessions"]:
+            continue
+        first, last = event["sessions"][0][1], event["sessions"][-1][1]
+        if last + datetime.timedelta(hours=3) < now:
+            continue
+        name = event["name"]
+        if first <= now:
+            upcoming = [(s, t) for s, t in event["sessions"] if t > now]
+            detail = (f"{upcoming[0][0]} {until(upcoming[0][1] - now)}" if upcoming
+                      else f"{event['sessions'][-1][0]} under way")
+            kicker, live = "This weekend", True
+        else:
+            detail = f"{event['location']} · {event['date']:%a %d %b} · {until(first - now)}"
+            kicker, live = f"Next race · round {event['round']}", False
+        return (
+            f'<div class="next-race{" live" if live else ""}">'
+            f'<div class="kicker"><i></i>{kicker}</div>'
+            f'<div class="name">{name}</div><div class="detail">{detail}</div></div>'
+        )
+    return ""
 
 
 def session_key(session):
@@ -2601,43 +2757,72 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 # Every choice in the sidebar is bound to the URL (bind="query-params"), so
-# what's on screen can be shared as a link -- ?gp=Spanish+Grand+Prix&session=
-# Qualifying&tab=head-to-head&drivers=NOR,ANT opens exactly that, and
-# ?view=Season the season (a bound widget writes the label it shows). Before
+# what's on screen can be shared as a link -- ?gp=Spanish&session=Quali&tab=
+# head-to-head&drivers=NOR,ANT opens exactly that, and ?view=Season the
+# season (a bound widget writes the label it shows, which is why the Grand
+# Prix and session labels are the short ones). Before
 # this, any link to the app opened on whatever the latest session was, and
 # "look at this" meant describing four dropdowns in a message. Values equal
 # to the default drop out of the URL on their own, so the bare address stays
 # bare.
+#
+# The section picker is the sidebar's navigation, so it's styled as one (see
+# the sidebar CSS): full-width rows with an icon and a line saying what's
+# there, no radio circles, no "Section" label over it.
 section = st.sidebar.radio(
     "Section", [SECTION_WEEKEND, SECTION_SEASON, SECTION_ALL_TIME], key="view", bind="query-params",
+    captions=["Timing, telemetry, strategy", "Standings, form, title fight", "Every race since 1950"],
+    label_visibility="collapsed",
 )
+
+# Short labels for the session buttons -- five of them have to share one row
+# of a 300px sidebar. They're also what goes in the URL (?session=Quali).
+SESSION_SHORT = {
+    "Practice 1": "FP1", "Practice 2": "FP2", "Practice 3": "FP3", "Qualifying": "Quali",
+    "Sprint Qualifying": "SQ", "Sprint Shootout": "SQ", "Sprint": "Sprint", "Race": "Race",
+}
+
+
+def short_gp(name):
+    return name.replace(" Grand Prix", "")
+
 
 session = None
 if section in (SECTION_WEEKEND, SECTION_SEASON):
-    st.sidebar.divider()
     years = available_years()
     keep_valid("year", years)
-    year = st.sidebar.selectbox("Year", options=years, key="year", bind="query-params")
+    # Year and Grand Prix share a row: the year is four digits and was
+    # taking a full-width field, a label and a gap of its own.
+    col_year, col_gp = st.sidebar.columns([1.25, 2], gap="small")
+    with col_year:
+        year = st.selectbox("Year", options=years, key="year", bind="query-params")
     schedule = load_schedule(year, include_in_progress=section == SECTION_WEEKEND)
     published = published_sessions(year) if data_store_token() is not None else None
     if published is not None:
         schedule = schedule[schedule["EventName"].isin(published)]
     event_options = schedule["EventName"].tolist()
     keep_valid("gp", event_options)
-    event_name = st.sidebar.selectbox(
-        "Grand Prix" if section == SECTION_WEEKEND else "Standings after",
-        options=event_options, key="gp", bind="query-params",
-    )
+    with col_gp:
+        event_name = st.selectbox(
+            "Grand Prix" if section == SECTION_WEEKEND else "Standings after",
+            options=event_options, format_func=short_gp, key="gp", bind="query-params",
+        )
     event_row = schedule[schedule["EventName"] == event_name].iloc[0]
     # The season views don't compare laps, but they do color drivers and
     # teams, and fastf1.plotting needs a loaded session to do that -- the
     # weekend's race is the one that's always there.
     if section == SECTION_WEEKEND:
+        # One button per session, in the order the weekend runs, rather than
+        # a dropdown: every session is in view and one tap away. Opens on the
+        # latest one.
         session_options = [
-            n for n in session_names_for(event_row) if published is None or n in published[event_name]
+            n for n in reversed(session_names_for(event_row)) if published is None or n in published[event_name]
         ]
         keep_valid("session", session_options)
-        session_name = st.sidebar.selectbox("Session", options=session_options, key="session", bind="query-params")
+        session_name = st.sidebar.segmented_control(
+            "Session", session_options, format_func=lambda n: SESSION_SHORT.get(n, n),
+            default=session_options[-1], required=True, key="session", bind="query-params", width="stretch",
+        ) or session_options[-1]
     else:
         session_name = "Race"
     try:
@@ -2711,16 +2896,19 @@ else:
     for stale in ("tab", "drivers"):
         st.query_params.pop(stale, None)
 
-st.sidebar.markdown(
-    '<div class="sidebar-foot">'
-    + freshness_line()
-    + '<b>Data</b> · FastF1 (official timing &amp; telemetry) + Ergast<br>'
-    '<b>Cache</b> · every session is fetched once, then read from disk<br>'
-    '<b>Note</b> · overtake counts and title odds are estimates<br>'
-    '<b>Unofficial</b> · not affiliated with Formula 1, the FIA or any team'
-    '</div>',
-    unsafe_allow_html=True,
-)
+st.sidebar.markdown(next_race_card() + freshness_line(), unsafe_allow_html=True)
+# The small print, folded away: it was four lines at the foot of every page
+# that nobody needs twice.
+with st.sidebar.expander("About the data"):
+    st.markdown(
+        '<div class="sidebar-foot">'
+        '<b>Data</b> · FastF1 (official timing &amp; telemetry), Ergast, DHL pit stop times<br>'
+        '<b>Cache</b> · every session is fetched once, then read from disk<br>'
+        '<b>Note</b> · overtake counts and title odds are estimates<br>'
+        '<b>Unofficial</b> · not affiliated with Formula 1, the FIA or any team'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 # ------------------------------------------------------------- telemetry --
 

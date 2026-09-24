@@ -25,8 +25,10 @@ the cumulative gap between them underneath:
 ![Head-to-head race pace](assets/screenshot-pace.png)
 
 Every view is a link: the sidebar choices, the open tab and the drivers being compared are all
-in the URL, so `?gp=Spanish+Grand+Prix&session=Qualifying&tab=head-to-head&drivers=NOR,ANT`
-opens exactly that comparison, and `?view=Season` the championship.
+in the URL, so `?gp=Spanish&session=Quali&tab=head-to-head&drivers=NOR,ANT` opens exactly that
+comparison, and `?view=Season` the championship. The sidebar itself is a navigation (icon, name
+and one line per section), the year and Grand Prix side by side, one button per session in the
+order the weekend runs, and a card with the weekend that's on now or the next one.
 
 ## Setup
 
