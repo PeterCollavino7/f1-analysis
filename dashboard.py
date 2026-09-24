@@ -1997,10 +1997,22 @@ def render_track_map(x, y, sectors, height=620, stroke_room=16):
     # tall render is what made this card come out nearly as wide as the
     # whole lap. As a fraction of the drawing it stays proportionate at any
     # size: roughly a third of the lap's width.
-    box_w, box_h = 480.0, 186.0
-    pad_x = 30.0
-    head_y, rule_y, row_a_y, row_b_y = 52.0, 74.0, 122.0, 164.0
-    font_head, font_code, font_time, font_gap = 42.0, 38.0, 38.0, 29.0
+    #
+    # ...up to a point. A third of the lap is right for a tall circuit, whose
+    # drawing is held to the 560px height and comes out narrow, but a wide
+    # one (Baku, Jeddah) fills the whole column, and a third of that was a
+    # card 370px across with 27px type -- bigger than the stretch of track it
+    # was describing. So the card shrinks when the drawing renders large: k
+    # is 1 for a tall circuit (the card as it was) and drops towards ~0.45
+    # for the widest, from how many pixels one unit of the viewBox is going
+    # to take. That only needs the column width to be in the right range,
+    # not exact -- a phone's (~360px) or a desktop's (~1000px).
+    px_per_unit = min((360 if on_phone() else 1000) / 1000, height / view_height)
+    k = min(1.0, 0.44 / px_per_unit)
+    box_w, box_h = 480.0 * k, 186.0 * k
+    pad_x = 30.0 * k
+    head_y, rule_y, row_a_y, row_b_y = 52.0 * k, 74.0 * k, 122.0 * k, 164.0 * k
+    font_head, font_code, font_time, font_gap = 42.0 * k, 38.0 * k, 38.0 * k, 29.0 * k
     for index, sector in enumerate(sectors):
         # Every third sample: at full resolution the path data runs to tens
         # of thousands of coordinates per lap for a curve that looks
@@ -2022,14 +2034,14 @@ def render_track_map(x, y, sectors, height=620, stroke_room=16):
         mid_x, mid_y = seg_x[len(seg_x) // 2], seg_y[len(seg_y) // 2]
         # Flip the card below the track when the sector sits near the top,
         # so it doesn't hang off the edge of the figure.
-        offset = 22.0
+        offset = 22.0 * k
         above = mid_y > box_h + offset
         top = mid_y - box_h - offset if above else mid_y + offset
         left = min(max(mid_x - box_w / 2, 4), 1000 - box_w - 4)
         gap_text = f"{'+' if sector['time_a'] >= sector['time_b'] else '-'}{sector['gap']:.3f}s"
         tips.append(
             f'<g id="tdt{index}" class="tip" transform="translate({left:.1f},{top:.1f})">'
-            f'<rect width="{box_w:.1f}" height="{box_h:.1f}" rx="14"/>'
+            f'<rect width="{box_w:.1f}" height="{box_h:.1f}" rx="{14 * k:.1f}"/>'
             f'<text class="tip-head" x="{box_w / 2:.1f}" y="{head_y:.1f}" '
             f'font-size="{font_head:.1f}" text-anchor="middle">Mini-sector {sector["number"]}</text>'
             f'<line x1="{pad_x:.1f}" y1="{rule_y:.1f}" x2="{box_w - pad_x:.1f}" y2="{rule_y:.1f}"/>'
