@@ -1204,7 +1204,7 @@ def full_name(row):
 
 
 @st.cache_data(ttl=3600, show_spinner="Loading the race calendar...")
-def load_schedule(year):
+def load_schedule(year, include_in_progress=False):
     with FF1_LOCK:
         schedule = fastf1.get_event_schedule(year)
     schedule = schedule[schedule["RoundNumber"] > 0]
@@ -1212,8 +1212,15 @@ def load_schedule(year):
     # calendar has no session data yet, so it has no business in the
     # dropdown. Session5 is the last session of the weekend (Race, or Sprint
     # weekends still end on Race), so its time is the real "is this done".
+    # include_in_progress tests the *first* session instead, which is what the
+    # weekend view wants: on a Friday evening practice has run and is worth
+    # looking at, and waiting for Sunday to list the weekend at all meant
+    # published practice data sat in the release, invisible. The season views
+    # keep the stricter test -- they read the weekend's race for standings and
+    # for driver colors, and a weekend in progress hasn't got one.
     now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-    schedule = schedule[schedule["Session5DateUtc"] <= now_utc]
+    first_or_last = "Session1DateUtc" if include_in_progress else "Session5DateUtc"
+    schedule = schedule[schedule[first_or_last] <= now_utc]
     # Descending so the most recently completed round is first -- the
     # Grand Prix selectbox below defaults to whatever's first in the list,
     # and opening on the latest race is more useful than opening on Round 1
@@ -1283,7 +1290,7 @@ def published_sessions(year):
     available = {}
     if not published:
         return available
-    for _, event in load_schedule(year).iterrows():
+    for _, event in load_schedule(year, include_in_progress=True).iterrows():
         for name in session_names_for(event):
             with FF1_LOCK:
                 key = session_key(fastf1.get_session(year, event["EventName"], name))
@@ -1389,11 +1396,14 @@ def session_names_for(event_row):
     qualifying count and naming (Sprint Qualifying, Sprint, ...) depend on the
     event format, so this is read from the schedule instead of assumed fixed.
     Reversed (like load_schedule's round order) so the session selectbox
-    below defaults to the Race instead of Practice 1."""
+    below defaults to the Race instead of Practice 1. A session that hasn't
+    started is left out: with a weekend in progress now listed from its first
+    session, the rest of it is still in the future."""
+    now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     names = []
     for i in range(1, 6):
-        name = event_row.get(f"Session{i}")
-        if isinstance(name, str) and name:
+        name, start = event_row.get(f"Session{i}"), event_row.get(f"Session{i}DateUtc")
+        if isinstance(name, str) and name and pd.notna(start) and start <= now_utc:
             names.append(name)
     return list(reversed(names))
 
@@ -2187,7 +2197,7 @@ session = None
 if section in (SECTION_WEEKEND, SECTION_SEASON):
     st.sidebar.divider()
     year = st.sidebar.selectbox("Year", options=available_years())
-    schedule = load_schedule(year)
+    schedule = load_schedule(year, include_in_progress=section == SECTION_WEEKEND)
     published = published_sessions(year) if data_store_token() is not None else None
     if published is not None:
         schedule = schedule[schedule["EventName"].isin(published)]
