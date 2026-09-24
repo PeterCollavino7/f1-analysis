@@ -4,7 +4,9 @@ degradation, for any past race weekend and any of its actual sessions.
 
 Run with: venv\\Scripts\\streamlit run dashboard.py
 """
+import colorsys
 import datetime
+import functools
 import io
 import logging
 import os
@@ -17,6 +19,7 @@ import zipfile
 from contextlib import contextmanager
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 # "auto": open on a desktop, closed on a phone -- forced open, the sidebar
 # covered four fifths of a phone screen and the charts peeked out beside it.
@@ -45,6 +48,8 @@ import pandas as pd
 import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+from ghost_lap import ghost_lap_html, ghost_lap_payload
 
 # FastF1 refuses to start on a cache directory that doesn't exist, and on a
 # fresh deploy (Streamlit Community Cloud) nothing has created it yet -- the
@@ -332,6 +337,8 @@ st.markdown(
         font-size: 0.7rem; line-height: 1.7; color: var(--ink-faint);
     }
     .sidebar-foot b { color: var(--ink-dim); font-weight: 600; }
+    .sidebar-foot .dim { opacity: 0.75; }
+    .sidebar-foot .late { color: var(--f1-amber); }
 
     /* --------------------------------------------------------------- hero */
     /* Stock photography of an F1 car would be someone else's copyright, so
@@ -400,10 +407,32 @@ st.markdown(
         border: 1px solid var(--line);
         font-size: 0.74rem; font-weight: 600; color: var(--ink-dim);
     }
-    .hero-track { position: relative; z-index: 1; flex: 0 0 auto; opacity: 0.8; }
+    .hero-track { position: relative; z-index: 1; flex: 0 0 auto; }
     .hero-track svg {
-        display: block; height: 112px; width: auto;
-        filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.18));
+        display: block; height: 140px; width: auto; max-width: 300px; overflow: visible;
+        filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.12));
+    }
+    .hero-track .draw {
+        stroke-dasharray: 1; stroke-dashoffset: 1;
+        animation: hero-draw 1.8s cubic-bezier(0.6, 0.1, 0.2, 1) 0.15s forwards;
+    }
+    @keyframes hero-draw { to { stroke-dashoffset: 0; } }
+    .hero-track .car {
+        fill: #fff; filter: drop-shadow(0 0 5px #fff);
+        opacity: 0; animation: hero-car 0.4s ease 2s forwards;
+    }
+    @keyframes hero-car { to { opacity: 1; } }
+    .hero-track .speed-key {
+        display: flex; align-items: center; justify-content: flex-end; gap: 0.4rem; margin-top: 0.55rem;
+        font: 500 0.6rem var(--mono); color: var(--ink-faint);
+    }
+    .hero-track .speed-key i {
+        width: 4.5rem; height: 4px; border-radius: 2px;
+        background: linear-gradient(90deg, #3d6bff, #19c6d8, #ffd23f, #ff3b30);
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .hero-track .draw { animation: none; stroke-dashoffset: 0; }
+        .hero-track .car { display: none; }
     }
 
     /* --------------------------------------------------------------- tabs */
@@ -796,6 +825,99 @@ st.markdown(
     .points-bar > span { display: block; height: 100%; border-radius: 999px; }
     .points-val { min-width: 2.9rem; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
 
+    /* Podium positions in podium colors -- after the leader rule, which
+       would otherwise paint P1's number plain white. */
+    table.standings tr.p1 td.pos { color: #ffcf4a; }
+    table.standings tr.p2 td.pos { color: #d9dfe7; }
+    table.standings tr.p3 td.pos { color: #e3a06b; }
+    /* A labelled rule between two groups of rows: the points line on a race
+       result, the knockout zones in qualifying. Dashed and faint so it reads
+       as a boundary, not as a row. */
+    table.standings tr.divider td {
+        padding: 0.45rem 0.7rem 0.25rem; border-bottom: none; background: none !important;
+    }
+    table.standings tr.divider td span {
+        display: flex; align-items: center; gap: 0.7rem;
+        font-size: 0.6rem; letter-spacing: 0.16em; text-transform: uppercase;
+        font-weight: 700; color: var(--ink-faint);
+    }
+    table.standings tr.divider td span::after {
+        content: ""; flex: 1; border-top: 1px dashed rgba(255, 255, 255, 0.16);
+    }
+    /* Tyre stints as the broadcast draws them: one ring per stint in the
+       compound's color, its initial inside, in the order they were run. */
+    .tyres { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .tyre {
+        width: 19px; height: 19px; border-radius: 50%; flex: none;
+        display: inline-grid; place-items: center;
+        border: 2.5px solid var(--tc); background: rgba(0, 0, 0, 0.35);
+        font: 700 0.58rem/1 var(--display); color: var(--tc);
+    }
+    /* The race's fastest lap in timing-screen purple. */
+    .purple-lap {
+        color: #e2cbff; background: rgba(181, 123, 255, 0.2);
+        border-radius: 6px; padding: 0.1rem 0.4rem; margin-left: -0.4rem;
+    }
+    /* DNF / DSQ / DNS, and the lap it happened on, as one small red tag in
+       the gap column -- the separate Status column that used to repeat it
+       ("DNF" under Gap, "Retired" under Status) is gone. */
+    .out {
+        display: inline-flex; align-items: baseline; gap: 0.35rem;
+        padding: 0.08rem 0.45rem; border-radius: 6px;
+        background: rgba(255, 92, 92, 0.13); color: #ff8080;
+        font: 700 0.74rem/1.5 var(--display); letter-spacing: 0.06em;
+    }
+    .out small { font-weight: 600; color: rgba(255, 128, 128, 0.7); letter-spacing: 0; }
+    /* Gap to the fastest, with a bar beside the number: twenty "+0.4xx"
+       figures read as noise, their lengths show where the field splits. */
+    .gapcell { display: flex; align-items: center; gap: 0.7rem; }
+    .gapcell span { min-width: 4.3rem; }
+    .gapcell b { flex: 1; max-width: 8rem; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.05); }
+    .gapcell i { display: block; height: 100%; border-radius: 3px; background: var(--gc); opacity: 0.8; }
+    /* Last five rounds as a tiny bar chart in a standings row: form, which a
+       season total hides. */
+    .formbars { display: inline-flex; align-items: flex-end; gap: 3px; height: 22px; vertical-align: middle; }
+    .formbars i { display: block; width: 6px; min-height: 2px; border-radius: 2px 2px 1px 1px; background: var(--fc); }
+    .formbars i.zero { opacity: 0.22; }
+    td.behind { color: var(--ink-faint); font-family: var(--mono); font-size: 0.82rem; text-align: right; }
+    .nil { color: var(--ink-faint); font-weight: 400; }
+    /* ▲2 / ▼1 beside a standings position: places moved since the round
+       before. */
+    .moved { font-size: 0.66rem; font-weight: 700; margin-left: 0.3rem; vertical-align: 2px; }
+    .moved.up { color: var(--f1-teal); }
+    .moved.down { color: #ff6b6b; }
+
+    /* ------------------------------------------------------- race story */
+    /* The race's length as a bar: neutralised stretches painted on it (solid
+       amber for a safety car, dashed for a VSC, red for a red flag) and a
+       dot for every change of lead, retirement and the finish. */
+    .story-strip { position: relative; height: 38px; margin: 0.7rem 0.9rem 0.3rem; }
+    .story-strip .track, .story-strip .seg { position: absolute; top: 10px; height: 6px; border-radius: 3px; }
+    .story-strip .track { left: 0; right: 0; background: rgba(255, 255, 255, 0.07); }
+    .story-strip .seg.sc { background: var(--f1-amber); }
+    .story-strip .seg.vsc { background: repeating-linear-gradient(90deg, var(--f1-amber) 0 5px, transparent 5px 8px); }
+    .story-strip .seg.red { background: var(--f1-red); }
+    .story-strip .mark {
+        position: absolute; top: 7px; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%;
+        background: var(--mc); border: 2px solid #0e1119; box-shadow: 0 0 10px -2px var(--mc);
+    }
+    .story-strip .tick {
+        position: absolute; top: 22px; transform: translateX(-50%);
+        font: 500 0.64rem var(--mono); color: var(--ink-faint);
+    }
+    .story-list { columns: 2 24rem; column-gap: 2.2rem; padding: 0.2rem 0.9rem 0.7rem; }
+    .story-item {
+        break-inside: avoid; display: grid; grid-template-columns: 2.6rem 0.8rem 1fr; gap: 0.45rem;
+        align-items: start; padding: 0.45rem 0; border-top: 1px solid var(--line);
+        font-size: 0.88rem; line-height: 1.45; color: var(--ink-dim);
+    }
+    .story-lap { font: 500 0.74rem/1.9 var(--mono); color: var(--ink-faint); }
+    .story-icon {
+        width: 9px; height: 9px; margin-top: 0.42rem; border-radius: 50%;
+        background: var(--ic); box-shadow: 0 0 8px -1px var(--ic);
+    }
+    .story-item b { font-weight: 700; letter-spacing: 0.03em; }
+
     /* ---------------------------------------------------------- track map */
     /* The whole point of drawing it as SVG instead of a Plotly figure is the
        :hover rule -- the browser lights the mini-sector under the cursor
@@ -851,6 +973,12 @@ st.markdown(
        stylesheet so it overrides the desktop rules above it. */
     @media (max-width: 640px) {
         .block-container { padding-left: 0.75rem; padding-right: 0.75rem; padding-top: 3.2rem; }
+        /* The header stacks: beside the text, the circuit squeezed a Grand
+           Prix name onto three lines. */
+        .hero { flex-direction: column; align-items: stretch; padding: 1.2rem 1.2rem 1rem; }
+        .hero-title { font-size: 1.8rem; }
+        .hero-track { align-self: center; }
+        .hero-track svg { height: 112px; }
         /* The header bar is see-through on a desktop; on a phone its menu
            buttons sat on top of the tab strip once the page scrolled. */
         [data-testid="stHeader"] { background: rgba(11, 14, 21, 0.92); backdrop-filter: blur(6px); }
@@ -859,7 +987,10 @@ st.markdown(
            column, whose content the gap column already carries. */
         table.standings th.badge, table.standings td.badge,
         table.standings th.team, table.standings td.team,
-        table.standings th.status, table.standings td.status { display: none; }
+        table.standings th.status, table.standings td.status,
+        table.standings th.tyrecol, table.standings td.tyrecol,
+        table.standings th.best, table.standings td.best,
+        table.standings th.formcol, table.standings td.formcol { display: none; }
         table.standings th { padding: 0 0.35rem 0.5rem; }
         table.standings td { padding: 0.45rem 0.35rem; font-size: 0.86rem; }
         table.standings td.mono { font-size: 0.8rem; }
@@ -923,9 +1054,11 @@ def load_standings_progression(year, up_to_round):
             constructor_table = ergast.get_constructor_standings(season=year, round=rnd).content[0]
         for _, r in driver_table.iterrows():
             name = r["driverCode"] if pd.notna(r["driverCode"]) else f"{r['givenName']} {r['familyName']}"
-            driver_rows.append({"Round": rnd, "Driver": name, "Points": r["points"]})
+            driver_rows.append({"Round": rnd, "Driver": name, "Points": r["points"], "Position": r["position"]})
         for _, r in constructor_table.iterrows():
-            constructor_rows.append({"Round": rnd, "Constructor": r["constructorName"], "Points": r["points"]})
+            constructor_rows.append({
+                "Round": rnd, "Constructor": r["constructorName"], "Points": r["points"], "Position": r["position"],
+            })
     return pd.DataFrame(driver_rows), pd.DataFrame(constructor_rows)
 
 
@@ -937,6 +1070,16 @@ def total_rounds_in_season(year):
     with FF1_LOCK:
         schedule = fastf1.get_event_schedule(year)
     return int(schedule[schedule["RoundNumber"] > 0]["RoundNumber"].max())
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def sprint_rounds_in_season(year):
+    """Round numbers of the season's sprint weekends, which put up points
+    twice -- the title maths has to count them."""
+    with FF1_LOCK:
+        schedule = fastf1.get_event_schedule(year)
+    sprints = schedule[schedule["EventFormat"].astype(str).str.contains("sprint")]
+    return {int(r) for r in sprints["RoundNumber"] if r > 0}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1251,16 +1394,16 @@ def github_headers(accept="application/vnd.github+json"):
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def published_assets(year):
-    """{asset name: API url} for the season's release; empty if there's no
-    release for that year."""
+def release_assets(year):
+    """Every asset of the season's release, as GitHub lists them (name, API
+    url, upload time); empty if there's no release for that year."""
     release = requests.get(
         f"https://api.github.com/repos/{DATA_REPO}/releases/tags/{year}", headers=github_headers(), timeout=20,
     )
     if release.status_code == 404:
-        return {}
+        return []
     release.raise_for_status()
-    assets, page = {}, 1
+    assets, page = [], 1
     while True:
         # The release object's own asset list isn't the place to read a full
         # season from; this endpoint pages through all of them.
@@ -1268,10 +1411,58 @@ def published_assets(year):
             f"https://api.github.com/repos/{DATA_REPO}/releases/{release.json()['id']}/assets",
             headers=github_headers(), params={"per_page": 100, "page": page}, timeout=20,
         ).json()
-        assets.update({a["name"]: a["url"] for a in batch})
+        assets += [{"name": a["name"], "url": a["url"], "updated": a["updated_at"]} for a in batch]
         if len(batch) < 100:
             return assets
         page += 1
+
+
+def published_assets(year):
+    """{asset name: API url} for the season's release."""
+    return {a["name"]: a["url"] for a in release_assets(year)}
+
+
+def freshness_line():
+    """"Updated 3 h ago" in the sidebar, from the newest upload in this
+    season's release -- and a warning when a session that should have been
+    published by now isn't. The hosted app only knows what the home PC has
+    uploaded, so a weekend with that PC switched off used to look exactly
+    like a weekend with no racing: nothing new, and no way to tell why."""
+    if data_store_token() is None:
+        return ""
+    this_year = datetime.datetime.now(datetime.timezone.utc).year
+    try:
+        assets = release_assets(this_year)
+    except Exception:
+        return ""
+    if not assets:
+        return ""
+    newest = max(pd.Timestamp(a["updated"]) for a in assets)
+    age = pd.Timestamp.now(tz="UTC") - newest
+    hours = age.total_seconds() / 3600
+    ago = (f"{max(1, round(age.total_seconds() / 60))} min ago" if hours < 1
+           else f"{hours:.0f} h ago" if hours < 36 else f"{age.days} days ago")
+    line = f'<b>Updated</b> · {ago} <span class="dim">({newest:%d %b, %H:%M} UTC)</span><br>'
+
+    # A session is late when it started more than 32 hours ago -- two hours
+    # to run, the six publish_data.py waits for the feed to settle, and a day
+    # for the daily task to come round -- and still isn't in the release.
+    try:
+        published = published_sessions(this_year)
+        now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        late = []
+        for _, event in load_schedule(this_year, include_in_progress=True).iterrows():
+            for i in range(1, 6):
+                name, start = event.get(f"Session{i}"), event.get(f"Session{i}DateUtc")
+                if (isinstance(name, str) and pd.notna(start)
+                        and now_utc - datetime.timedelta(days=10) < start < now_utc - datetime.timedelta(hours=32)
+                        and name not in published.get(event["EventName"], [])):
+                    late.append(f"{event['EventName'].replace(' Grand Prix', ' GP')} {name}")
+    except Exception:
+        late = []
+    if late:
+        line += f'<span class="late">Not published yet · {", ".join(late[-2:])}</span><br>'
+    return line
 
 
 def session_key(session):
@@ -1432,13 +1623,60 @@ def interp_extrapolate(t, xp, fp):
     return float(np.interp(t, xp, fp))
 
 
+# Team colors are the teams' own, picked for white TV graphics -- on this
+# app's near-black panels three of the 2026 eleven all but disappeared: Red
+# Bull's #0600ef (1.9:1 against the panel), Cadillac's #444444 (1.8:1) and
+# Aston Martin's #00665f (2.6:1). VER's line on the race pace chart was a dark
+# blue scribble. readable() lifts a color's lightness, hue and saturation
+# kept, until it clears 3:1 -- the WCAG floor for lines and marks -- so Red
+# Bull is still unmistakably Red Bull blue, just one you can see. Colors that
+# already pass come back unchanged.
+PANEL_BG = "#141824"
+MIN_CONTRAST = 3.2
+
+
+def _luminance(hex_color):
+    r, g, b = (int(hex_color[i : i + 2], 16) / 255 for i in (1, 3, 5))
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in (r, g, b)]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(a, b):
+    la, lb = _luminance(a), _luminance(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+@functools.lru_cache(maxsize=512)
+def readable(color):
+    if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        return color
+    if _contrast(color, PANEL_BG) >= MIN_CONTRAST:
+        return color
+    h, l, s = colorsys.rgb_to_hls(*(int(color[i : i + 2], 16) / 255 for i in (1, 3, 5)))
+    while l < 0.95:
+        l = min(0.95, l + 0.02)
+        lifted = "#" + "".join(f"{round(c * 255):02x}" for c in colorsys.hls_to_rgb(h, l, s))
+        if _contrast(lifted, PANEL_BG) >= MIN_CONTRAST:
+            return lifted
+    return lifted
+
+
 def safe_driver_color(code, session):
     """get_driver_color raises for a code that isn't in this session's entry
     list (a mid-season replacement, a one-off stand-in, or any driver from a
     season-wide view), so every lookup outside the telemetry tab needs its
     own guard rather than reusing build_driver_styles."""
     try:
-        return fastf1.plotting.get_driver_color(code, session)
+        return readable(fastf1.plotting.get_driver_color(code, session))
+    except Exception:
+        return "#999999"
+
+
+def team_color(name):
+    """A team's color, made readable -- grey for a name FastF1 can't place
+    (DHL's short names, past teams)."""
+    try:
+        return readable(fastf1.plotting.get_team_color(name, session))
     except Exception:
         return "#999999"
 
@@ -1498,15 +1736,24 @@ def render_table(rows, columns):
     Each row is a dict of cell values, optionally carrying "badge" (an image
     URI, rendered in a leading column) and "color" (the accent stripe on the
     first cell). Columns are (key, header, css class) triples.
+
+    Two extras for the timing-screen feel: a row can carry "divider", a
+    label drawn as a thin rule *above* it (the points line, the qualifying
+    knockout zones), and the top three rows are marked p1/p2/p3 so their
+    position numbers take the podium colors.
     """
     has_badges = any(row.get("badge") for row in rows)
+    span = len(columns) + (1 if has_badges else 0)
     html = ["<table class='standings'><thead><tr>"]
     if has_badges:
         html.append("<th class='badge'></th>")
     html += [f"<th class='{css_class}'>{header}</th>" for _, header, css_class in columns]
     html.append("</tr></thead><tbody>")
     for rank, row in enumerate(rows):
-        html.append("<tr class='leader'>" if rank == 0 else "<tr>")
+        if row.get("divider"):
+            html.append(f"<tr class='divider'><td colspan='{span}'><span>{row['divider']}</span></td></tr>")
+        classes = (["leader"] if rank == 0 else []) + ([f"p{rank + 1}"] if rank < 3 and row.get("podium", True) else [])
+        html.append(f"<tr class='{' '.join(classes)}'>")
         if has_badges:
             badge = row.get("badge")
             html.append(f"<td class='badge'>{f'<img src=\"{badge}\">' if badge else ''}</td>")
@@ -1518,8 +1765,29 @@ def render_table(rows, columns):
     st.markdown("<div class='table-scroll'>" + "".join(html) + "</div>", unsafe_allow_html=True)
 
 
+# Slow to fast, for the speed-colored circuit in the header: the ramp speed
+# maps usually use (cool corners, hot straights), in four stops so the middle
+# doesn't wash out to grey the way a straight blue-to-red blend does.
+SPEED_RAMP = ["#3d6bff", "#19c6d8", "#ffd23f", "#ff3b30"]
+
+
+def ramp_color(t):
+    t = min(max(float(t), 0.0), 1.0) * (len(SPEED_RAMP) - 1)
+    i = min(int(t), len(SPEED_RAMP) - 2)
+    a, b = SPEED_RAMP[i], SPEED_RAMP[i + 1]
+    mix = [int(a[k : k + 2], 16) + (int(b[k : k + 2], 16) - int(a[k : k + 2], 16)) * (t - i) for k in (1, 3, 5)]
+    return "#" + "".join(f"{round(c):02x}" for c in mix)
+
+
 def circuit_outline(session, stroke=5):
-    """The circuit traced as a small SVG, for the page header.
+    """The circuit for the page header, traced from the session's fastest
+    lap and colored by how fast that lap was at every point -- the braking
+    zones cool, the straights hot -- so the artwork says something about the
+    track instead of only showing its shape. It draws itself in when the
+    page opens, and a dot then laps it on a loop at the real lap's own
+    rhythm (fast on the straights, slow through the corners -- the timing
+    comes from the telemetry, compressed to a few seconds). Both are off
+    under prefers-reduced-motion.
 
     Returns an empty string rather than raising if the session has no usable
     position data -- the header is decoration, and a practice session nobody
@@ -1528,25 +1796,59 @@ def circuit_outline(session, stroke=5):
     try:
         lap = session.laps.pick_fastest()
         telemetry = lap.get_telemetry()
-        x = telemetry["X"].to_numpy(dtype=float)[::8]
-        y = -telemetry["Y"].to_numpy(dtype=float)[::8]
+        step = 6
+        x = telemetry["X"].to_numpy(dtype=float)[::step]
+        y = -telemetry["Y"].to_numpy(dtype=float)[::step]
+        speed = telemetry["Speed"].to_numpy(dtype=float)[::step]
+        elapsed = telemetry["Time"].dt.total_seconds().to_numpy(dtype=float)[::step]
     except Exception:
         return ""
-    if len(x) < 10:
+    if len(x) < 10 or not np.isfinite(speed).any():
         return ""
     pad = stroke
     span_x = max(x.max() - x.min(), 1e-6)
     span_y = max(y.max() - y.min(), 1e-6)
     scale = (300 - 2 * pad) / span_x
     view_height = span_y * scale + 2 * pad
-    points = " ".join(
-        f"{(px - x.min()) * scale + pad:.1f},{(py - y.min()) * scale + pad:.1f}"
-        for px, py in zip(x, y)
+    px = (x - x.min()) * scale + pad
+    py = (y - y.min()) * scale + pad
+    low, high = np.nanmin(speed), np.nanmax(speed)
+    segments = "".join(
+        f'<line x1="{px[i]:.1f}" y1="{py[i]:.1f}" x2="{px[i + 1]:.1f}" y2="{py[i + 1]:.1f}" '
+        f'stroke="{ramp_color((speed[i] - low) / max(high - low, 1))}"/>'
+        for i in range(len(px) - 1)
     )
+    path = "M" + " L".join(f"{a:.1f},{b:.1f}" for a, b in zip(px, py))
+
+    # The dot's timing: where along the path it is (keyPoints, a share of
+    # the path's length) at each moment of the lap (keyTimes, a share of the
+    # lap time). Forty samples is plenty for the eye and keeps the markup
+    # short.
+    lengths = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(px), np.diff(py)))])
+    duration = elapsed[-1] - elapsed[0]
+    motion = ""
+    if lengths[-1] > 0 and duration > 0:
+        picks = np.linspace(0, len(px) - 1, 40).astype(int)
+        key_times = (elapsed[picks] - elapsed[0]) / duration
+        key_points = np.maximum.accumulate(lengths[picks] / lengths[-1])
+        key_times[0], key_times[-1], key_points[0], key_points[-1] = 0.0, 1.0, 0.0, 1.0
+        seconds = max(4.0, duration / 12)
+        motion = (
+            f'<circle class="car" r="{stroke * 1.15:.1f}">'
+            f'<animateMotion dur="{seconds:.1f}s" repeatCount="indefinite" calcMode="linear" '
+            f'keyTimes="{";".join(f"{v:.4f}" for v in key_times)}" '
+            f'keyPoints="{";".join(f"{v:.4f}" for v in key_points)}">'
+            f'<mpath href="#hero-lap"/></animateMotion></circle>'
+        )
     return (
-        f'<svg viewBox="0 0 300 {view_height:.0f}" preserveAspectRatio="xMidYMid meet">'
-        f'<polyline points="{points}" fill="none" stroke="rgba(255,255,255,0.75)" '
-        f'stroke-width="{stroke}" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        f'<svg viewBox="-4 -4 308 {view_height + 8:.0f}" preserveAspectRatio="xMidYMid meet">'
+        f'<defs><path id="hero-lap" d="{path}"/>'
+        f'<mask id="hero-draw" maskUnits="userSpaceOnUse">'
+        f'<path class="draw" d="{path}" pathLength="1" fill="none" stroke="#fff" '
+        f'stroke-width="{stroke * 3}" stroke-linecap="round" stroke-linejoin="round"/></mask></defs>'
+        f'<g mask="url(#hero-draw)" stroke-width="{stroke}" stroke-linecap="round">{segments}</g>'
+        f"{motion}</svg>"
+        f'<div class="speed-key"><span>{low:.0f}</span><i></i><span>{high:.0f} km/h</span></div>'
     )
 
 
@@ -1779,6 +2081,46 @@ def points_cell(points, leader_points, color):
     )
 
 
+def form_cell(scores, color, scale):
+    """A standings row's last five rounds as a tiny bar chart (see .formbars).
+    scores: [(round, points)], oldest first. One fixed scale for every row
+    -- a full-points weekend -- so the bars compare down the table, not
+    only along a row."""
+    bars = "".join(
+        f'<i class="{"zero" if pts <= 0 else ""}" '
+        f'style="height:{max(2.0, 22 * min(pts, scale) / scale):.0f}px;--fc:{color}" '
+        f'title="Round {rnd}: {pts:.0f} pts"></i>'
+        for rnd, pts in scores[-5:]
+    )
+    return f'<span class="formbars">{bars}</span>'
+
+
+def standings_history(progress, entity_col, round_number):
+    """From the running totals round by round: each entrant's points per
+    round, and their official position after the round before this one
+    (Ergast's, so a tie on points is settled by count-back as it should be,
+    not by whichever order a sort happens to leave it in)."""
+    running = progress.pivot_table(index=entity_col, columns="Round", values="Points", aggfunc="last")
+    running = running.reindex(columns=sorted(running.columns)).ffill(axis=1).fillna(0)
+    per_round = running.diff(axis=1)
+    per_round[running.columns[0]] = running[running.columns[0]]
+    scores = {name: list(zip(per_round.columns, row)) for name, row in per_round.iterrows()}
+    before = progress[progress["Round"] == round_number - 1].dropna(subset=["Position"])
+    previous = dict(zip(before[entity_col], before["Position"].astype(int)))
+    return scores, previous
+
+
+def moved_badge(previous_rank, rank):
+    """▲2 / ▼1 beside a standings position: places gained since the round
+    before. Nothing when it didn't change."""
+    if previous_rank is None or pd.isna(rank):
+        return ""
+    moved = int(previous_rank - rank)
+    if moved == 0:
+        return ""
+    return f'<span class="moved {"up" if moved > 0 else "down"}">{"▲" if moved > 0 else "▼"}{abs(moved)}</span>'
+
+
 def format_lap_time(td):
     if pd.isna(td):
         return "—"
@@ -1842,7 +2184,7 @@ def build_driver_styles(drivers, session):
     styles = {}
     seen_colors = set()
     for driver in drivers:
-        color = fastf1.plotting.get_driver_color(driver, session)
+        color = readable(fastf1.plotting.get_driver_color(driver, session))
         if color in seen_colors:
             color = "#ffffff"
         else:
@@ -2185,37 +2527,107 @@ SECTION_WEEKEND = "Race weekend"
 SECTION_SEASON = "Season"
 SECTION_ALL_TIME = "All-time records"
 
+
+def tab_slug(label):
+    return label.lower().replace(" ", "-")
+
+
+def url_tabs(labels, key):
+    """st.tabs that remember which one is open -- in the URL (?tab=pace), so
+    a shared link lands on the tab it was copied from -- and that run only the
+    open tab's code. Plain st.tabs runs every tab on every rerun, whatever is
+    on screen: picking a driver on Head-to-head recomputed the whole Pace tab
+    underneath it, and opening Season loaded every race of the year for the
+    Race by race tab before showing the standings. on_change="rerun" is what
+    gives each tab its .open flag; showing() reads it.
+
+    default= is always the tab that's open already. Streamlit counts it as
+    part of the tabs' identity, so a default that changed between reruns --
+    the URL's tab on the first run, nothing after it -- made them a new
+    widget, back on its first tab: picking a driver on Head-to-head bounced
+    the page to Results. Moving to a session with other tabs keeps the
+    reader on the same one, or its counterpart (Pace <-> Stats)."""
+    counterpart = {"Pace": "Stats", "Stats": "Pace"}
+    open_now = st.session_state.get(key)
+    wanted = st.query_params.get("tab")
+    from_url = next((label for label in labels if tab_slug(label) == wanted), None)
+    default = next(
+        (label for label in (open_now, counterpart.get(open_now), from_url) if label in labels), None,
+    )
+    if default == labels[0]:
+        default = None
+    tabs = st.tabs(labels, default=default, key=key, on_change="rerun")
+    current = st.session_state.get(key) or labels[0]
+    if current == labels[0]:
+        st.query_params.pop("tab", None)
+    else:
+        st.query_params["tab"] = tab_slug(current)
+    if tab_slug(current) not in ("pace", "head-to-head"):
+        st.query_params.pop("drivers", None)
+    return tabs
+
+
+def showing(tab):
+    """Whether a tab's content should run this time: it's the open one, or
+    the tabs don't track state (open is None) and everything runs."""
+    return tab is not None and tab.open is not False
+
+
+def keep_valid(key, options):
+    """Drop a remembered choice the new options no longer contain (a Grand
+    Prix after the year changed, Sprint after moving to a weekend without
+    one), so the widget falls back to its default -- the latest round, the
+    race -- rather than raising over a value it can't show."""
+    if key in st.session_state and st.session_state[key] not in options:
+        del st.session_state[key]
+
+
 st.sidebar.markdown(
     '<div class="sidebar-brand"><div class="flag"></div>'
     '<div class="word"><em>F1</em> DASHBOARD'
     '<span>TELEMETRY · STANDINGS · RECORDS</span></div></div>',
     unsafe_allow_html=True,
 )
-section = st.sidebar.radio("Section", [SECTION_WEEKEND, SECTION_SEASON, SECTION_ALL_TIME])
+# Every choice in the sidebar is bound to the URL (bind="query-params"), so
+# what's on screen can be shared as a link -- ?gp=Spanish+Grand+Prix&session=
+# Qualifying&tab=head-to-head&drivers=NOR,ANT opens exactly that, and
+# ?view=Season the season (a bound widget writes the label it shows). Before
+# this, any link to the app opened on whatever the latest session was, and
+# "look at this" meant describing four dropdowns in a message. Values equal
+# to the default drop out of the URL on their own, so the bare address stays
+# bare.
+section = st.sidebar.radio(
+    "Section", [SECTION_WEEKEND, SECTION_SEASON, SECTION_ALL_TIME], key="view", bind="query-params",
+)
 
 session = None
 if section in (SECTION_WEEKEND, SECTION_SEASON):
     st.sidebar.divider()
-    year = st.sidebar.selectbox("Year", options=available_years())
+    years = available_years()
+    keep_valid("year", years)
+    year = st.sidebar.selectbox("Year", options=years, key="year", bind="query-params")
     schedule = load_schedule(year, include_in_progress=section == SECTION_WEEKEND)
     published = published_sessions(year) if data_store_token() is not None else None
     if published is not None:
         schedule = schedule[schedule["EventName"].isin(published)]
+    event_options = schedule["EventName"].tolist()
+    keep_valid("gp", event_options)
     event_name = st.sidebar.selectbox(
         "Grand Prix" if section == SECTION_WEEKEND else "Standings after",
-        options=schedule["EventName"].tolist(),
+        options=event_options, key="gp", bind="query-params",
     )
     event_row = schedule[schedule["EventName"] == event_name].iloc[0]
     # The season views don't compare laps, but they do color drivers and
     # teams, and fastf1.plotting needs a loaded session to do that -- the
     # weekend's race is the one that's always there.
-    session_name = (
-        st.sidebar.selectbox(
-            "Session",
-            options=[n for n in session_names_for(event_row) if published is None or n in published[event_name]],
-        )
-        if section == SECTION_WEEKEND else "Race"
-    )
+    if section == SECTION_WEEKEND:
+        session_options = [
+            n for n in session_names_for(event_row) if published is None or n in published[event_name]
+        ]
+        keep_valid("session", session_options)
+        session_name = st.sidebar.selectbox("Session", options=session_options, key="session", bind="query-params")
+    else:
+        session_name = "Race"
     try:
         # The season views only need the session for driver and team colors,
         # so they skip its telemetry.
@@ -2259,7 +2671,7 @@ if section == SECTION_WEEKEND:
         tab_labels = ["Results", "Strategy", "Pace", "Head-to-head"]
     else:
         tab_labels = ["Results", "Pace", "Head-to-head"]
-    weekend_tabs = st.tabs(tab_labels)
+    weekend_tabs = url_tabs(tab_labels, "tabs_weekend")
     tab_classification, tab_pace, tab_telemetry = weekend_tabs[0], weekend_tabs[-2], weekend_tabs[-1]
     tab_strategy = weekend_tabs[1] if is_race_like else None
 elif section == SECTION_SEASON:
@@ -2274,8 +2686,8 @@ elif section == SECTION_SEASON:
             f"\U0001F4CA round {int(event_row['RoundNumber'])}",
         ],
     )
-    tab_standings, tab_season_stats, tab_teammates, tab_pits = st.tabs(
-        ["Championship", "Race by race", "Teammates", "Pit stops"]
+    tab_standings, tab_season_stats, tab_teammates, tab_pits = url_tabs(
+        ["Championship", "Race by race", "Teammates", "Pit stops"], "tabs_season"
     )
 else:
     render_hero(
@@ -2284,10 +2696,13 @@ else:
         "Every world-championship race ever run, ranked",
         chip_items=["\U0001F3C6 wins", "\U0001F3C1 poles", "\U0001F4C8 streaks", f"\U0001F551 {datetime.date.today().year - 1949} seasons"],
     )
+    for stale in ("tab", "drivers"):
+        st.query_params.pop(stale, None)
 
 st.sidebar.markdown(
     '<div class="sidebar-foot">'
-    '<b>Data</b> · FastF1 (official timing &amp; telemetry) + Ergast<br>'
+    + freshness_line()
+    + '<b>Data</b> · FastF1 (official timing &amp; telemetry) + Ergast<br>'
     '<b>Cache</b> · every session is fetched once, then read from disk<br>'
     '<b>Note</b> · overtake counts and title odds are estimates<br>'
     '<b>Unofficial</b> · not affiliated with Formula 1, the FIA or any team'
@@ -2337,7 +2752,7 @@ def picker_key(name):
     return f"pick_drivers_{name}_{session_slug()}"
 
 
-def driver_picker(name, label, help_text, eligible, on_pick=None, limit=MAX_DRIVERS, default=()):
+def driver_picker(name, label, help_text, eligible, on_pick=None, limit=MAX_DRIVERS, default=(), share=False):
     """A two-driver choice: one pill per driver, teammates side by side, each
     marked with its team color. Used by the Head-to-head tab and by the race
     pace comparison; `name` keeps their selections apart, `eligible` is who
@@ -2347,9 +2762,11 @@ def driver_picker(name, label, help_text, eligible, on_pick=None, limit=MAX_DRIV
     pick. Here every driver is in view, one click toggles, and a third pick
     replaces the older of the two.
 
-    Starts empty (a choice, not whichever two come first), and the widget key
-    carries the session, so switching race or session starts over rather
-    than carrying over drivers the new session may not even have.
+    Starts empty (a choice, not whichever two come first). The widget key
+    carries the session, but with share=True the pair also lives in the URL
+    (?drivers=VER,NOR), so it follows the reader to another session or race
+    -- qualifying, then the race, same two drivers -- minus anyone the new
+    session doesn't have.
     """
     results = session.results.sort_values("Position")
     with_laps = set(eligible)
@@ -2380,9 +2797,20 @@ def driver_picker(name, label, help_text, eligible, on_pick=None, limit=MAX_DRIV
 
     # A starting selection goes in through session state, not the widget's
     # default=: the callback above writes st.session_state[key], and a widget
-    # given both a default and a state-set value warns on screen.
+    # given both a default and a state-set value warns on screen. What it
+    # starts from, in order: the pick made here before (the click-order list
+    # is plain session state, which outlives the widget -- the widget's own
+    # state is dropped whenever its tab isn't the one open, and with only the
+    # open tab running now, that was every tab switch); the pair in the URL,
+    # for a shared link; and only then the caller's default.
     if key not in st.session_state:
-        initial = [d for d in default if d in order][-limit:]
+        from_url = [d for d in st.query_params.get("drivers", "").split(",") if d in order] if share else []
+        # A shared pair missing a driver the default has (the pace chart
+        # opens on two) isn't a pair any more; the default takes over.
+        if len(from_url) < len(list(default)[:limit]):
+            from_url = []
+        remembered = st.session_state.get(history_key) or from_url or list(default)
+        initial = [d for d in remembered if d in order][-limit:]
         st.session_state[key] = initial
         st.session_state[history_key] = initial
     st.pills(
@@ -2390,6 +2818,11 @@ def driver_picker(name, label, help_text, eligible, on_pick=None, limit=MAX_DRIV
         on_change=keep_newest_two, help=help_text,
     )
     selected = [d for d in st.session_state.get(history_key, []) if d in order]
+    if share:
+        if selected:
+            st.query_params["drivers"] = ",".join(selected)
+        else:
+            st.query_params.pop("drivers", None)
 
     # Team color per pill, via nth-of-type on the buttons in option order.
     # A selected pill takes the color its line will have on the charts, which
@@ -2410,7 +2843,7 @@ def render_telemetry_tab():
     selected_drivers = driver_picker(
         "telemetry", "Choose two drivers to compare",
         "The first driver you pick is the reference lap. Picking a third replaces the older of the two.",
-        session.laps["Driver"].unique(),
+        session.laps["Driver"].unique(), share=True,
     )
     # st.segmented_control rather than a radio: this is a two-way toggle
     # between unit systems, not a list of choices, and the segmented
@@ -2643,6 +3076,38 @@ def render_telemetry_tab():
         # sides of the comparison legible whoever the pair is.
         if color_b.lower() in ("#ffffff", color_a.lower()):
             color_b = "#2ee86e"
+
+        # The two laps raced against each other, before the charts that take
+        # them apart: the lap trace below says where the time went, this
+        # shows it happening -- who brakes later, who gets on the power
+        # first, and the gap opening and closing as they go.
+        with chart_panel(
+            "Ghost lap",
+            f"{dom_a} and {dom_b}'s fastest laps on the same track at the same time · "
+            "speed, gear, pedals and the live gap",
+            accent=color_a,
+        ):
+            components.html(
+                ghost_lap_html(
+                    ghost_lap_payload(
+                        common_distance_m, x_on_grid, y_on_grid,
+                        [
+                            {
+                                "code": d, "color": c,
+                                "lap_time": laps_by_driver[d]["LapTime"].total_seconds(),
+                                "elapsed": resampled[d]["Elapsed"], "speed": resampled[d]["Speed"],
+                                "throttle": resampled[d]["Throttle"], "brake": resampled[d]["Brake"],
+                                "gear": resampled[d]["nGear"],
+                            }
+                            for d, c in ((dom_a, color_a), (dom_b, color_b))
+                        ],
+                        sector_distances=shared_checkpoint_distance[1:3] if sector_checkpoints else (),
+                        speed_unit=speed_unit, speed_factor=KM_TO_MI if imperial else 1.0,
+                    ),
+                    height=600,
+                ),
+                height=610,
+            )
 
         sector_paths = []
         for i in range(TRACK_SECTOR_COUNT):
@@ -2931,7 +3396,7 @@ def render_telemetry_tab():
         plotly_chart(fig_telemetry, width="stretch", config=PLOTLY_CONFIG)
 
 
-if section == SECTION_WEEKEND:
+if section == SECTION_WEEKEND and showing(tab_telemetry):
     with tab_telemetry:
         render_telemetry_tab()
 
@@ -3024,6 +3489,17 @@ def render_position_chart():
             fig_position.add_hrect(
                 y0=0.5, y1=3.5, fillcolor="rgba(255,179,64,0.07)", line_width=0, layer="below",
             )
+            # Safety car, VSC and red-flag laps shaded, as on the pace chart:
+            # a field that bunches up and stops swapping places makes sense
+            # once you can see why. Read off the leader's laps, which carry
+            # the track status the whole field shares.
+            for _, lap_row in position_laps[position_laps["Position"] == 1].drop_duplicates("LapNumber").iterrows():
+                status = str(lap_row["TrackStatus"]) if pd.notna(lap_row["TrackStatus"]) else ""
+                if any(ch in status for ch in "4567"):
+                    fig_position.add_vrect(
+                        x0=lap_row["LapNumber"] - 1, x1=lap_row["LapNumber"],
+                        fillcolor="rgba(255,179,64,0.08)", line_width=0, layer="below",
+                    )
             fig_position.add_annotation(
                 x=position_laps["LapNumber"].min() - 0.8, y=3.5, text="PODIUM", showarrow=False,
                 xanchor="left", yanchor="bottom", textangle=0,
@@ -3133,10 +3609,7 @@ def render_quali_stats():
 def dhl_team_color(team):
     """DHL's team names are short ("Red Bull", "Haas") and include past
     teams; FastF1 matches loosely, and anything it can't place goes grey."""
-    try:
-        return fastf1.plotting.get_team_color(team, session)
-    except Exception:
-        return "#999999"
+    return team_color(team)
 
 
 def pit_list(rows, best_duration=None):
@@ -3272,12 +3745,6 @@ def render_car_characteristics():
         taken.append((r.Corner, r.Top, position))
         positions.append((r.Index, position))
     df["Position"] = pd.Series(dict(positions))
-
-    def team_color(name):
-        try:
-            return fastf1.plotting.get_team_color(name, session)
-        except Exception:
-            return "#999999"
 
     with chart_panel(
         "Straight-line speed vs. cornering",
@@ -3474,8 +3941,11 @@ def render_pace_tab():
         # keeps in session state, falling back to that same default pair.
         h2h_eligible = h2h_laps["Driver"].unique()
         default_pair = order_by_classification(session, h2h_eligible)[:2]
+        url_pair = [d for d in st.query_params.get("drivers", "").split(",") if d in h2h_eligible]
         picked = [
-            d for d in st.session_state.get(picker_key("pace") + "_order", default_pair) if d in h2h_eligible
+            d for d in (st.session_state.get(picker_key("pace") + "_order")
+                        or (url_pair if len(url_pair) == 2 else default_pair))
+            if d in h2h_eligible
         ]
         with chart_panel(
             "Race pace head-to-head" + (f" · {picked[0]} vs {picked[1]}" if len(picked) == 2 else ""),
@@ -3496,7 +3966,7 @@ def render_pace_tab():
                     "pace", "Drivers",
                     "The first driver is the one the gap is measured from. "
                     "Picking a new one replaces the older of the two.",
-                    h2h_eligible, on_pick=close_pace_popover, default=default_pair,
+                    h2h_eligible, on_pick=close_pace_popover, default=default_pair, share=True,
                 )
             if len(h2h_drivers) < 2:
                 empty_state("Pick two drivers to see their pace lap by lap", "prompt")
@@ -3963,7 +4433,7 @@ def render_pace_tab():
                 plotly_chart(fig_drivers, width="stretch", config=PLOTLY_CONFIG)
 
 
-if section == SECTION_WEEKEND:
+if section == SECTION_WEEKEND and showing(tab_pace):
     with tab_pace:
         # Qualifying gets its own Stats here: pace and degradation are built
         # around stints over a race distance, and a qualifying lap is a single
@@ -3974,123 +4444,360 @@ if section == SECTION_WEEKEND:
             render_car_characteristics()
         else:
             render_pace_tab()
-    if tab_strategy is not None:
-        with tab_strategy:
-            render_strategy_tab()
+
+if section == SECTION_WEEKEND and showing(tab_strategy):
+    with tab_strategy:
+        render_strategy_tab()
 
 # --------------------------------------------------------- classification --
 
-if section == SECTION_WEEKEND:
-    with tab_classification:
-        results = session.results
+def render_race_story():
+    """The race told in its moments, built from the data rather than
+    written: the start, every change of lead (on track, or through the
+    pits), safety cars and red flags, penalties, retirements, the fastest
+    lap and the finish. A strip across the top places them on the race's
+    own length. The charts on this tab show what happened to everyone; this
+    is the version a reader who wasn't watching can follow."""
+    laps = session.laps.dropna(subset=["LapNumber"])
+    if laps.empty or laps["Position"].isna().all():
+        return
+    total = int(laps["LapNumber"].max())
+    results = session.results
+    color = lambda code: safe_driver_color(code, session)
+    who = lambda code: f'<b style="color:{color(code)}">{code}</b>'
+    events = []  # (lap, order within the lap, kind, html)
 
-        if results.empty or results["Position"].isna().all():
-            # Practice has no official classification -- rank by fastest lap
-            # instead, the closest equivalent to what timing screens show live.
-            section_head(
-                "Fastest laps",
-                session_name,
-                f"{session_name} has no official classification -- this ranks every driver by "
-                "their best lap of the session instead.",
-                accent=PALETTE["blue"],
-            )
-            fastest = session.laps.groupby("Driver")["LapTime"].min().dropna().sort_values()
-            # Laps completed, beside the time -- a practice ranking without it
-            # says who was quick but not who was working: a 1:45.4 on lap 3 of
-            # 28 and the same time as a driver's only flying lap are different
-            # sessions. Every row of session.laps is a lap the driver crossed
-            # the line on, in and out laps included, which is the same count a
-            # timing screen shows.
-            laps_run = session.laps.groupby("Driver").size()
-            team_by_driver = results.set_index("Abbreviation")["TeamName"] if not results.empty else {}
-            number_by_driver = results.set_index("Abbreviation")["DriverNumber"] if not results.empty else {}
-            rows = [
-                {
-                    "badge": driver_number_badge(
-                        number_by_driver.get(driver, "—"), safe_driver_color(driver, session)
-                    ),
-                    "color": safe_driver_color(driver, session),
-                    "pos": rank,
-                    "driver": driver,
-                    "team": team_by_driver.get(driver, ""),
-                    "best": format_lap_time(lap_time),
-                    "gap": "—" if rank == 1 else f"+{(lap_time - fastest.iloc[0]).total_seconds():.3f}",
-                    "laps": str(int(laps_run.get(driver, 0))),
-                }
-                for rank, (driver, lap_time) in enumerate(fastest.items(), start=1)
-            ]
-            with chart_panel("Session ranking", "By best lap", accent=PALETTE["blue"]):
-                render_table(rows, [
-                    ("pos", "Pos", "pos"), ("driver", "Driver", "name"), ("team", "Team", "team"),
-                    ("best", "Best lap", "mono"), ("gap", "Gap", "mono"), ("laps", "Laps", "num"),
-                ])
+    # The start: who led lap one, and from where.
+    leaders = (
+        laps[laps["Position"] == 1].drop_duplicates("LapNumber").set_index("LapNumber")["Driver"].sort_index()
+    )
+    grid = results.set_index("Abbreviation")["GridPosition"] if "GridPosition" in results else pd.Series(dtype=float)
+    if 1 in leaders.index:
+        first = leaders.loc[1]
+        start_slot = grid.get(first)
+        if pd.notna(start_slot) and start_slot == 1:
+            events.append((1, 0, "start", f"{who(first)} converts pole into the lead"))
+        elif pd.notna(start_slot) and start_slot > 0:
+            events.append((1, 0, "start", f"{who(first)} leads from P{int(start_slot)} on the grid"))
         else:
-            has_quali_times = results[["Q1", "Q2", "Q3"]].notna().any().any()
-            classified = results.sort_values("Position")
-            leader_row = classified[classified["Position"] == 1]
-            leader_laps = leader_row["Laps"].iloc[0] if len(leader_row) and pd.notna(leader_row["Laps"].iloc[0]) else None
+            events.append((1, 0, "start", f"{who(first)} leads the opening lap"))
+        lap_one = laps[laps["LapNumber"] == 1].set_index("Driver")["Position"].dropna()
+        gains = {d: grid.get(d) - p for d, p in lap_one.items() if pd.notna(grid.get(d)) and grid.get(d) > 0}
+        if gains:
+            best = max(gains, key=gains.get)
+            if gains[best] >= 3:
+                events.append((1, 1, "start", f"{who(best)} gains {gains[best]:.0f} places on the opening lap"))
 
-            rows = []
-            for _, r in classified.iterrows():
-                color = safe_driver_color(r["Abbreviation"], session)
-                row = {
-                    "badge": driver_number_badge(
-                        r["DriverNumber"] if pd.notna(r["DriverNumber"]) else "—", color,
-                    ),
-                    "color": color,
-                    "pos": str(int(r["Position"])) if pd.notna(r["Position"]) else "—",
-                    "driver": r["Abbreviation"],
-                    "team": r["TeamName"],
-                }
-                if has_quali_times:
-                    row["q1"] = format_lap_time(r["Q1"])
-                    row["q2"] = format_lap_time(r["Q2"])
-                    row["q3"] = format_lap_time(r["Q3"])
-                else:
-                    row["grid"] = str(int(r["GridPosition"])) if pd.notna(r["GridPosition"]) else "—"
-                    row["gap"] = format_race_gap(r, leader_laps)
-                    row["pts"] = f"{r['Points']:.0f}" if pd.notna(r["Points"]) else "0"
-                    row["status"] = result_code(r) or (r["Status"] if pd.notna(r["Status"]) else "—")
-                    # Places gained or lost, as its own column. It was derivable
-                    # from Grid and Pos side by side, but only by subtracting
-                    # two numbers in your head for every one of twenty rows --
-                    # and it's the single most-asked question of a results
-                    # table. A grid value of 0 means a pit-lane start, which
-                    # has no meaningful "places gained" to report.
-                    if pd.notna(r["GridPosition"]) and pd.notna(r["Position"]) and r["GridPosition"] > 0:
-                        moved = int(r["GridPosition"] - r["Position"])
-                        css = "up" if moved > 0 else ("down" if moved < 0 else "flat")
-                        arrow = "▲" if moved > 0 else ("▼" if moved < 0 else "·")
-                        row["delta"] = f"<span class='{css}'>{arrow} {abs(moved) if moved else ''}</span>"
-                    else:
-                        row["delta"] = "<span class='flat'>—</span>"
-                rows.append(row)
+    # Changes of lead, and how they happened.
+    passes = {(n, a, b) for n, a, b in detect_passes(session)}
+    pitting = laps[laps["PitInTime"].notna()].groupby("Driver")["LapNumber"].apply(set)
+    previous = leaders.iloc[0] if len(leaders) else None
+    for lap_number, leader in leaders.items():
+        if lap_number == 1 or leader == previous:
+            previous = leader
+            continue
+        if (lap_number, leader, previous) in passes:
+            text = f"{who(leader)} passes {who(previous)} for the lead"
+        elif lap_number in pitting.get(previous, set()) or (lap_number - 1) in pitting.get(previous, set()):
+            text = f"{who(leader)} inherits the lead as {who(previous)} pits"
+        else:
+            text = f"{who(leader)} takes the lead from {who(previous)}"
+        events.append((int(lap_number), 2, "lead", text))
+        previous = leader
 
-            columns = [("pos", "Pos", "pos"), ("driver", "Driver", "name"), ("team", "Team", "team")]
-            if has_quali_times:
-                columns += [("q1", "Q1", "mono"), ("q2", "Q2", "mono"), ("q3", "Q3", "mono")]
+    # Neutralisations, from race control: deployed ... ending, as a span.
+    spans = []
+    try:
+        messages = session.race_control_messages
+    except Exception:
+        messages = None  # not loaded: the story goes on without the flags
+    if messages is None:
+        messages = pd.DataFrame()
+    open_span = None
+    for _, m in messages.iterrows():
+        text, lap_number = str(m.get("Message", "")), m.get("Lap")
+        if pd.isna(lap_number):
+            continue
+        lap_number = int(lap_number)
+        if text in ("SAFETY CAR DEPLOYED", "VSC DEPLOYED", "VIRTUAL SAFETY CAR DEPLOYED"):
+            open_span = ["vsc" if "V" in text.split()[0] else "sc", lap_number]
+        elif open_span and text in ("SAFETY CAR IN THIS LAP", "VSC ENDING", "VIRTUAL SAFETY CAR ENDING"):
+            spans.append((open_span[0], open_span[1], lap_number))
+            open_span = None
+        elif m.get("Flag") == "RED":
+            spans.append(("red", lap_number, lap_number))
+        penalty = re.search(
+            r"(\d+ SECOND TIME PENALTY|DRIVE THROUGH PENALTY|STOP AND GO PENALTY|\d+ PLACE GRID PENALTY)"
+            r" FOR CAR \d+ \((\w{3})\)(?:\s*-\s*([^(]+))?", text,
+        )
+        if penalty and "SERVED" not in text:
+            what = penalty.group(1).replace(" SECOND ", " s ").lower().replace(" penalty", " penalty")
+            why = f" for {penalty.group(3).strip().lower()}" if penalty.group(3) else ""
+            events.append((lap_number, 5, "penalty", f"{who(penalty.group(2))} gets a {what}{why}"))
+    if open_span:
+        spans.append((open_span[0], open_span[1], total))
+    names = {"sc": "Safety car", "vsc": "Virtual safety car", "red": "Red flag"}
+    for kind, start, end in spans:
+        span_text = f"laps {start}–{end}" if end > start else f"lap {start}"
+        events.append((start, 3, kind, f"{names[kind]} · {span_text}"))
+
+    # Retirements.
+    for _, r in results.iterrows():
+        code_out = result_code(r)
+        if code_out not in ("DNF", "DSQ"):
+            continue
+        done = laps[laps["Driver"] == r["Abbreviation"]]["LapNumber"].max()
+        reason = str(r["Status"]) if pd.notna(r.get("Status")) and r["Status"] not in ("Retired", "Did not finish") else ""
+        verb = "is disqualified" if code_out == "DSQ" else "retires"
+        lap_out = int(done) + 1 if pd.notna(done) else 1
+        events.append((min(lap_out, total), 4, "out", f"{who(r['Abbreviation'])} {verb}" + (f" · {reason.lower()}" if reason else "")))
+
+    # Fastest lap and the finish.
+    try:
+        fastest = laps.pick_fastest()
+        if fastest is not None and pd.notna(fastest["LapTime"]):
+            events.append((int(fastest["LapNumber"]), 6, "fastest",
+                           f"{who(fastest['Driver'])} sets the fastest lap, {format_lap_time(fastest['LapTime'])}"))
+    except Exception:
+        pass
+    order = results.sort_values("Position")
+    if len(order) >= 2 and pd.notna(order.iloc[0]["Position"]):
+        winner, second = order.iloc[0], order.iloc[1]
+        margin = second["Time"].total_seconds() if pd.notna(second.get("Time")) else None
+        by = f" by {margin:.3f} s" if margin else ""
+        events.append((total, 9, "finish", f"{who(winner['Abbreviation'])} wins{by} from {who(second['Abbreviation'])}"))
+
+    if len(events) < 3:
+        return
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    icon = {"start": PALETTE["teal"], "lead": "#ffcf4a", "sc": PALETTE["amber"], "vsc": PALETTE["amber"],
+            "red": PALETTE["red"], "penalty": PALETTE["pink"], "out": "#ff6b6b",
+            "fastest": PALETTE["violet"], "finish": "#f4f6f8"}
+    pct = lambda lap_number: 100 * (lap_number - 1) / max(total - 1, 1)
+    strip = ['<div class="story-strip"><div class="track"></div>']
+    for kind, start, end in spans:
+        strip.append(
+            f'<div class="seg {kind}" style="left:{pct(start):.2f}%;width:{max(pct(end + 1) - pct(start), 0.8):.2f}%" '
+            f'title="{names[kind]} · lap {start}{"–" + str(end) if end > start else ""}"></div>'
+        )
+    for lap_number, _, kind, html in events:
+        if kind in ("lead", "out", "finish") or (kind == "start" and lap_number == 1):
+            strip.append(
+                f'<div class="mark" style="left:{min(pct(lap_number), 100):.2f}%;--mc:{icon[kind]}" '
+                f'title="Lap {lap_number}: {re.sub("<[^>]+>", "", html)}"></div>'
+            )
+    for tick in sorted({1, *range(10, total, 10), total}):
+        strip.append(f'<div class="tick" style="left:{pct(tick):.2f}%">{tick}</div>')
+    strip.append("</div>")
+
+    items = "".join(
+        f'<div class="story-item"><span class="story-lap">L{lap_number}</span>'
+        f'<span class="story-icon" style="--ic:{icon[kind]}"></span><span>{html}</span></div>'
+        for lap_number, _, kind, html in events
+    )
+    with chart_panel("How the race unfolded", f"{total} laps · built from the timing data and race control",
+                     accent="#ffcf4a"):
+        st.markdown("".join(strip) + f'<div class="story-list">{items}</div>', unsafe_allow_html=True)
+    st.write("")
+
+
+COMPOUND_LETTER = {"SOFT": "S", "MEDIUM": "M", "HARD": "H", "INTERMEDIATE": "I", "WET": "W"}
+
+
+def tyre_rings(driver_laps):
+    """A driver's stints as compound rings, in the order run (see .tyre)."""
+    rings = []
+    for _, stint in driver_laps.dropna(subset=["Stint"]).groupby("Stint"):
+        known = stint["Compound"].dropna()
+        compound = str(known.iloc[0]) if len(known) else "UNKNOWN"
+        first, last = int(stint["LapNumber"].min()), int(stint["LapNumber"].max())
+        rings.append(
+            f'<span class="tyre" style="--tc:{COMPOUND_COLORS.get(compound, "#8a8f98")}" '
+            f'title="{compound.title()} · laps {first}–{last}">{COMPOUND_LETTER.get(compound, "?")}</span>'
+        )
+    return f'<span class="tyres">{"".join(rings)}</span>' if rings else "—"
+
+
+def best_lap_cell(lap_time, overall_best):
+    """A driver's best lap; the session's fastest in purple, as on a timing
+    screen."""
+    if pd.isna(lap_time):
+        return "—"
+    text = format_lap_time(lap_time)
+    return f'<span class="purple-lap">{text}</span>' if lap_time == overall_best else text
+
+
+def gap_bar_cell(text, gap_seconds, widest, color):
+    width = 0 if not widest else min(100, 100 * gap_seconds / widest)
+    return f'<div class="gapcell"><span>{text}</span><b><i style="width:{width:.1f}%;--gc:{color}"></i></b></div>'
+
+
+def render_classification():
+    results = session.results
+    laps_all = session.laps
+    best_by_driver = laps_all.groupby("Driver")["LapTime"].min()
+    overall_best = best_by_driver.min()
+
+    if results.empty or results["Position"].isna().all():
+        # Practice has no official classification -- rank by fastest lap
+        # instead, the closest equivalent to what timing screens show live.
+        section_head(
+            "Fastest laps",
+            session_name,
+            f"{session_name} has no official classification -- this ranks every driver by "
+            "their best lap of the session instead.",
+            accent=PALETTE["blue"],
+        )
+        fastest = best_by_driver.dropna().sort_values()
+        # Laps completed, beside the time -- a practice ranking without it
+        # says who was quick but not who was working: a 1:45.4 on lap 3 of
+        # 28 and the same time as a driver's only flying lap are different
+        # sessions. Every row of session.laps is a lap the driver crossed
+        # the line on, in and out laps included, which is the same count a
+        # timing screen shows.
+        laps_run = laps_all.groupby("Driver").size()
+        team_by_driver = results.set_index("Abbreviation")["TeamName"] if not results.empty else {}
+        number_by_driver = results.set_index("Abbreviation")["DriverNumber"] if not results.empty else {}
+        # The compound each driver's best lap was set on: in practice that is
+        # half the story of the time -- a medium-tyre long run near the top is
+        # worth more than a soft-tyre glory lap just ahead of it.
+        best_rows = laps_all.dropna(subset=["LapTime"]).sort_values("LapTime").drop_duplicates("Driver")
+        best_compound = best_rows.set_index("Driver")["Compound"]
+        widest = (fastest.iloc[-1] - fastest.iloc[0]).total_seconds() if len(fastest) else 0
+        rows = []
+        for rank, (driver, lap_time) in enumerate(fastest.items(), start=1):
+            color = safe_driver_color(driver, session)
+            compound = str(best_compound.get(driver, "UNKNOWN"))
+            gap = (lap_time - fastest.iloc[0]).total_seconds()
+            rows.append({
+                "badge": driver_number_badge(number_by_driver.get(driver, "—"), color),
+                "color": color,
+                "pos": rank,
+                "driver": driver,
+                "team": team_by_driver.get(driver, ""),
+                "best": best_lap_cell(lap_time, overall_best),
+                "tyre": (f'<span class="tyres"><span class="tyre" style="--tc:'
+                         f'{COMPOUND_COLORS.get(compound, "#8a8f98")}" title="{compound.title()}">'
+                         f'{COMPOUND_LETTER.get(compound, "?")}</span></span>'),
+                "gap": gap_bar_cell("—" if rank == 1 else f"+{gap:.3f}", gap, widest, color),
+                "laps": str(int(laps_run.get(driver, 0))),
+            })
+        with chart_panel("Session ranking", "By best lap · the ring is the tyre it was set on",
+                         accent=PALETTE["blue"]):
+            render_table(rows, [
+                ("pos", "Pos", "pos"), ("driver", "Driver", "name"), ("team", "Team", "team"),
+                ("best", "Best lap", "mono"), ("tyre", "Tyre", "tyrecol"), ("gap", "Gap", "mono"),
+                ("laps", "Laps", "num"),
+            ])
+        return
+
+    has_quali_times = results[["Q1", "Q2", "Q3"]].notna().any().any()
+    classified = results.sort_values("Position")
+    leader_row = classified[classified["Position"] == 1]
+    leader_laps = leader_row["Laps"].iloc[0] if len(leader_row) and pd.notna(leader_row["Laps"].iloc[0]) else None
+    laps_run = laps_all.groupby("Driver")["LapNumber"].max()
+    # The best time of each part of qualifying, for the purple.
+    segment_best = {q: classified[q].min() for q in ("Q1", "Q2", "Q3")} if has_quali_times else {}
+    points_places = 8 if session_name == "Sprint" else 10
+
+    rows = []
+    for index, (_, r) in enumerate(classified.iterrows()):
+        code = r["Abbreviation"]
+        color = safe_driver_color(code, session)
+        row = {
+            "badge": driver_number_badge(r["DriverNumber"] if pd.notna(r["DriverNumber"]) else "—", color),
+            "color": color,
+            "pos": str(int(r["Position"])) if pd.notna(r["Position"]) else "—",
+            "driver": code,
+            "team": r["TeamName"],
+        }
+        if has_quali_times:
+            for q in ("Q1", "Q2", "Q3"):
+                row[q.lower()] = best_lap_cell(r[q], segment_best[q])
+            # Gap within the part a driver last ran, to that part's fastest:
+            # a Q1 time against a pole lap set an hour later on a rubbered-in
+            # track would mostly measure the track.
+            last = next((q for q in ("Q3", "Q2", "Q1") if pd.notna(r[q])), None)
+            if last is None:
+                row["gap"] = "—"
             else:
-                columns += [
-                    ("grid", "Grid", "num"), ("delta", "+/−", "delta"), ("gap", "Gap", "mono"),
-                    ("pts", "Pts", "num"), ("status", "Status", "status"),
-                ]
-            panel_title = "Qualifying classification" if has_quali_times else "Race classification"
-            with chart_panel(
-                panel_title,
-                f"{event_name} · {session_name}",
-                accent=PALETTE["red"],
-            ):
-                render_table(rows, columns)
+                gap = (r[last] - segment_best[last]).total_seconds()
+                row["gap"] = "—" if gap == 0 else f"+{gap:.3f}"
+            # Knockout zones: the first driver who didn't reach Q3 (then Q2)
+            # opens a band of their own, labelled.
+            if index and pd.isna(r["Q3"]) and pd.notna(classified.iloc[index - 1]["Q3"]):
+                row["divider"] = "Knocked out in Q2" if pd.notna(r["Q2"]) else "Knocked out in Q1"
+            elif index and pd.isna(r["Q2"]) and pd.notna(classified.iloc[index - 1]["Q2"]):
+                row["divider"] = "Knocked out in Q1"
+        else:
+            row["grid"] = (
+                "PL" if pd.notna(r["GridPosition"]) and r["GridPosition"] == 0
+                else str(int(r["GridPosition"])) if pd.notna(r["GridPosition"]) else "—"
+            )
+            code_out = result_code(r)
+            if code_out:
+                # DNF and the lap it came on; the reason, when the results
+                # carry one ("Engine", "Collision"), on hover.
+                completed = r["Laps"] if pd.notna(r.get("Laps")) else laps_run.get(code)
+                reason = r["Status"] if pd.notna(r.get("Status")) else ""
+                row["gap"] = (
+                    f'<span class="out" title="{reason}">{code_out}'
+                    + (f"<small>L{int(completed)}</small>" if pd.notna(completed) and completed else "")
+                    + "</span>"
+                )
+            else:
+                row["gap"] = format_race_gap(r, leader_laps)
+            points = r["Points"] if pd.notna(r["Points"]) else 0
+            row["pts"] = f"{points:.0f}" if points else '<span class="nil">0</span>'
+            row["tyres"] = tyre_rings(laps_all.pick_drivers(code))
+            row["best"] = best_lap_cell(best_by_driver.get(code), overall_best)
+            # Places gained or lost, as its own column. It was derivable
+            # from Grid and Pos side by side, but only by subtracting
+            # two numbers in your head for every one of twenty rows --
+            # and it's the single most-asked question of a results
+            # table. A grid value of 0 means a pit-lane start, which
+            # has no meaningful "places gained" to report.
+            if pd.notna(r["GridPosition"]) and pd.notna(r["Position"]) and r["GridPosition"] > 0:
+                moved = int(r["GridPosition"] - r["Position"])
+                css = "up" if moved > 0 else ("down" if moved < 0 else "flat")
+                arrow = "▲" if moved > 0 else ("▼" if moved < 0 else "·")
+                row["delta"] = f"<span class='{css}'>{arrow} {abs(moved) if moved else ''}</span>"
+            else:
+                row["delta"] = "<span class='flat'>—</span>"
+            if index == points_places and len(classified) > points_places:
+                row["divider"] = "Outside the points"
+        rows.append(row)
 
-            if not has_quali_times:
-                st.write("")
-                render_position_chart()
-                st.write("")
-                render_overtakes()
+    columns = [("pos", "Pos", "pos"), ("driver", "Driver", "name"), ("team", "Team", "team")]
+    if has_quali_times:
+        columns += [("q1", "Q1", "mono"), ("q2", "Q2", "mono"), ("q3", "Q3", "mono"), ("gap", "Gap", "mono")]
+        hint = f"{event_name} · {session_name} · purple is the fastest time of each part"
+    else:
+        columns += [
+            ("grid", "Grid", "num"), ("delta", "+/−", "delta"), ("tyres", "Tyres", "tyrecol"),
+            ("best", "Best lap", "best mono"), ("gap", "Gap", "mono"), ("pts", "Pts", "num"),
+        ]
+        hint = f"{event_name} · {session_name} · tyres in the order run, fastest lap in purple"
+    panel_title = "Qualifying classification" if has_quali_times else f"{session_name} classification"
+    with chart_panel(panel_title, hint, accent=PALETTE["red"]):
+        render_table(rows, columns)
+
+    if not has_quali_times:
+        st.write("")
+        render_race_story()
+        render_position_chart()
+        st.write("")
+        render_overtakes()
+
+
+if section == SECTION_WEEKEND and showing(tab_classification):
+    with tab_classification:
+        render_classification()
 
 # ------------------------------------------------------------- standings --
 
-if section == SECTION_SEASON:
+if section == SECTION_SEASON and showing(tab_standings):
     with tab_standings:
         round_number = int(event_row["RoundNumber"])
 
@@ -4108,12 +4815,6 @@ if section == SECTION_SEASON:
                 # renders them they're noise next to the number, and the leader
                 # row already carries a highlighted background.
                 return "—" if pd.isna(pos) else str(int(pos))
-
-            def team_color(name):
-                try:
-                    return fastf1.plotting.get_team_color(name, session)
-                except Exception:
-                    return "#999999"
 
             def driver_color(code):
                 return safe_driver_color(code, session)
@@ -4231,25 +4932,34 @@ if section == SECTION_SEASON:
                 st.write("")
 
             leader_points = driver_standings["points"].max()
+            driver_scores, driver_before = standings_history(driver_progress, "Driver", round_number)
             driver_rows = []
-            for _, r in driver_standings.iterrows():
+            for _, r in driver_standings.sort_values("position").iterrows():
                 code = r["driverCode"] if pd.notna(r["driverCode"]) else ""
+                name = code or f"{r['givenName']} {r['familyName']}"
                 color = driver_color(code)
                 driver_rows.append({
                     "badge": driver_number_badge(
                         int(r["driverNumber"]) if pd.notna(r["driverNumber"]) else "—", color,
                     ),
-                    "pos": pos_label(r["position"]),
-                    "name": code or f"{r['givenName']} {r['familyName']}",
+                    "pos": pos_label(r["position"]) + moved_badge(driver_before.get(name), r["position"]),
+                    "name": name,
                     "team": r["constructorNames"][0] if len(r["constructorNames"]) else "—",
                     "points": points_cell(r["points"], leader_points, color),
+                    "behind": "—" if r["points"] == leader_points else f"−{leader_points - r['points']:.0f}",
+                    # A race and a sprint in one weekend is the most anyone
+                    # can score in a round: 25 + 8.
+                    "form": form_cell(driver_scores.get(name, []), color, 33),
                     "wins": int(r["wins"]),
                     "color": color,
                 })
-            with chart_panel("Drivers' standings", f"after round {round_number}"):
+            with chart_panel("Drivers' standings",
+                             f"after round {round_number} · ▲▼ places moved since the round before · "
+                             "bars: points in each of the last five rounds"):
                 render_table(driver_rows, [
                     ("pos", "Pos", "pos"), ("name", "Driver", "name"), ("team", "Team", "team"),
-                    ("points", "Points", "points"), ("wins", "Wins", "num"),
+                    ("points", "Points", "points"), ("behind", "Gap", "behind"),
+                    ("form", "Last 5", "formcol"), ("wins", "Wins", "num"),
                 ])
 
             st.write("")
@@ -4336,20 +5046,25 @@ if section == SECTION_SEASON:
                 st.write("")
 
             leader_team_points = constructor_standings["points"].max()
+            team_scores, team_before = standings_history(constructor_progress, "Constructor", round_number)
             constructor_rows = [
                 {
-                    "pos": pos_label(r["position"]),
+                    "pos": pos_label(r["position"]) + moved_badge(team_before.get(r["constructorName"]), r["position"]),
                     "name": r["constructorName"],
                     "points": points_cell(r["points"], leader_team_points, team_color(r["constructorName"])),
+                    "behind": "—" if r["points"] == leader_team_points else f"−{leader_team_points - r['points']:.0f}",
+                    # Both cars first and second, in the race and the sprint.
+                    "form": form_cell(team_scores.get(r["constructorName"], []), team_color(r["constructorName"]), 58),
                     "wins": int(r["wins"]),
                     "color": team_color(r["constructorName"]),
                 }
-                for _, r in constructor_standings.iterrows()
+                for _, r in constructor_standings.sort_values("position").iterrows()
             ]
             with chart_panel("Constructors' standings", f"after round {round_number}", accent=PALETTE["blue"]):
                 render_table(constructor_rows, [
                     ("pos", "Pos", "pos"), ("name", "Constructor", "name"),
-                    ("points", "Points", "points"), ("wins", "Wins", "num"),
+                    ("points", "Points", "points"), ("behind", "Gap", "behind"),
+                    ("form", "Last 5", "formcol"), ("wins", "Wins", "num"),
                 ])
 
             st.write("")
@@ -4359,17 +5074,10 @@ if section == SECTION_SEASON:
             section_head(
                 "Title fight",
                 f"{remaining_rounds} race{'s' if remaining_rounds != 1 else ''} left",
-                "How the championship looks from here, simulated from what each contender has "
-                "actually been scoring.",
+                "Can anyone still catch the leader? Each line is the lead over one rival, round by round; "
+                "the shaded area is every point still to play for. A lead that climbs out of it can't be "
+                "overturned any more.",
                 accent=PALETTE["amber"],
-            )
-            method_note(
-                "A simplified Monte Carlo estimate limited to the current top 3: each remaining race "
-                "is resampled from that driver's (or team's) own points scored per race so far, "
-                "independently of who else is on track -- so a driver's simulated score doesn't take "
-                "points away from a rival the way a real race would -- and anyone outside the top 3 "
-                "is ignored. **Treat this as a feel for how close the fight is, not a forecast.**",
-                "How the odds are simulated",
             )
 
             def race_history(progress_df, col, name):
@@ -4388,102 +5096,121 @@ if section == SECTION_SEASON:
                 counts = np.bincount(winners, minlength=len(names))
                 return {n: counts[i] / trials for i, n in enumerate(names)}
 
-            def odds_chart(title, names, odds, colors):
-                # A bar chart invites reading the axis as an absolute scale; these
-                # three numbers only mean something relative to each other (they
-                # sum to 100% by construction, since the sim always picks exactly
-                # one of the three as champion) -- a donut makes that "shares of
-                # one whole" relationship the shape itself, not something to infer.
-                ranked = sorted(zip(names, odds, colors), key=lambda t: t[1], reverse=True)
-                fig = go.Figure(
-                    go.Pie(
-                        labels=[n for n, _, _ in ranked], values=[o * 100 for _, o, _ in ranked],
-                        marker=dict(
-                            colors=[c for _, _, c in ranked],
-                            line=dict(color="#0d1017", width=3),
-                        ),
-                        # The favourite's slice is pulled a hair out of the ring
-                        # so the chart has a subject, not just three shares.
-                        pull=[0.035] + [0] * (len(ranked) - 1),
-                        hole=0.62, sort=False,
-                        # No slice labels at all. Plotly stacks the outside
-                        # ones in the order it draws them, so the two
-                        # no-hope contenders -- whose slices are a sliver or
-                        # nothing -- piled their names on top of each other
-                        # above the ring, next to a leader line pointing at a
-                        # slice too thin to see. The three names and shares
-                        # are listed as chips under the chart instead, where
-                        # they can't collide, and the favourite's own share
-                        # is in the hole.
-                        textinfo="none",
-                        hovertemplate="%{label}: %{percent}<extra></extra>",
-                    )
-                )
-                fig.update_layout(
-                    **DARK_LAYOUT,
-                    height=270, showlegend=False, margin=dict(t=10, b=10, l=10, r=10),
-                )
-                # Two annotations, not one with a <span> in it: a mixed-size
-                # <br> block is laid out on the base font's line height, so the
-                # 26px number rode up into the name above it.
-                fig.add_annotation(
-                    text=f"<b>{ranked[0][0]}</b>", showarrow=False,
-                    font=dict(size=13, color=ranked[0][2]), x=0.5, y=0.60,
-                )
-                fig.add_annotation(
-                    text=f"{format_odds(ranked[0][1] * 100)}", showarrow=False,
-                    font=dict(size=27, color=ranked[0][2]), x=0.5, y=0.44,
-                )
-                return fig
+            sprint_rounds = sprint_rounds_in_season(year)
 
-            col_drivers_odds, col_constructors_odds = st.columns(2)
+            def still_available(after_round, per_race, per_sprint):
+                """Points still to be won once after_round rounds are done."""
+                return sum(
+                    per_race + (per_sprint if rnd in sprint_rounds else 0)
+                    for rnd in range(after_round + 1, total_rounds + 1)
+                )
 
-            with col_drivers_odds:
-                st.markdown(
-                    '<div class="panel-head" style="--accent:' + PALETTE["red"] + '">'
-                    '<div class="title">Drivers\' title odds</div></div>',
-                    unsafe_allow_html=True,
-                )
-                top3_drivers = driver_standings.sort_values("position").head(3)
-                names = [
-                    r["driverCode"] if pd.notna(r["driverCode"]) else f"{r['givenName']} {r['familyName']}"
-                    for _, r in top3_drivers.iterrows()
-                ]
-                histories = [race_history(driver_progress, "Driver", n) for n in names]
-                odds = simulate_top3_odds(names, top3_drivers["points"].tolist(), histories, remaining_rounds)
-                colors = [driver_color(n) for n in names]
-                plotly_chart(
-                    odds_chart("", names, [odds[n] for n in names], colors),
-                    width="stretch", config=PLOTLY_CONFIG,
-                )
-                chips([
-                    (color, f"{name} {format_odds(odds[name] * 100)}")
-                    for name, color in sorted(
-                        zip(names, colors), key=lambda pair: odds[pair[0]], reverse=True,
-                    )
-                ])
+            def title_fight(progress, entity_col, names, colors, per_race, per_sprint, label):
+                """The leader's margin over each of the next two, against the
+                points still available -- the arithmetic of a title, drawn.
+                It replaced two donuts of simulated odds, which with a big
+                lead came out as a solid ring reading "100%": a chart with
+                nothing on it, and a certainty the resampling can't claim.
+                This one has no model in it at all."""
+                running = progress.pivot_table(index="Round", columns=entity_col, values="Points", aggfunc="last")
+                running = running.sort_index().ffill().fillna(0)
+                leader = names[0]
+                rounds_all = list(range(0, total_rounds + 1))
+                available = [still_available(r, per_race, per_sprint) for r in rounds_all]
+                margin_now = running[leader].iloc[-1] - running[names[1]].iloc[-1] if len(names) > 1 else 0
+                available_now = still_available(round_number, per_race, per_sprint)
 
-            with col_constructors_odds:
-                st.markdown(
-                    '<div class="panel-head" style="--accent:' + PALETTE["blue"] + '">'
-                    '<div class="title">Constructors\' title odds</div></div>',
-                    unsafe_allow_html=True,
-                )
-                top3_constructors = constructor_standings.sort_values("position").head(3)
-                names_c = top3_constructors["constructorName"].tolist()
-                histories_c = [race_history(constructor_progress, "Constructor", n) for n in names_c]
-                odds_c = simulate_top3_odds(names_c, top3_constructors["points"].tolist(), histories_c, remaining_rounds)
-                colors_c = [team_color(n) for n in names_c]
-                plotly_chart(
-                    odds_chart("", names_c, [odds_c[n] for n in names_c], colors_c),
-                    width="stretch", config=PLOTLY_CONFIG,
-                )
-                chips([
-                    (color, f"{name.replace(' F1 Team', '')} {format_odds(odds_c[name] * 100)}")
-                    for name, color in sorted(
-                        zip(names_c, colors_c), key=lambda pair: odds_c[pair[0]], reverse=True,
+                fig = base_figure("", "Points", "Round", hovermode="x unified")
+                fig.update_layout(height=380, showlegend=False, margin=dict(t=16, b=44, l=8, r=70))
+                fig.add_trace(go.Scatter(
+                    x=rounds_all, y=available, mode="lines", line=dict(color="rgba(255,179,64,0.55)", width=1.5, shape="hv"),
+                    fill="tozeroy", fillcolor="rgba(255,179,64,0.07)",
+                    name="Still to play for", hovertemplate="%{y:.0f} pts still to play for<extra></extra>",
+                ))
+                rivals = list(zip(names, colors))[1:]
+                ends = [running[leader].iloc[-1] - running[rival].iloc[-1] for rival, _ in rivals]
+                # The two end labels are pushed apart when the two leads
+                # finish close together, as they do when P2 and P3 are level.
+                offsets = spread_labels(ends, plot_height_px=380 - 16 - 44, value_span=max(available[0], 1))
+                for (rival, color), offset in zip(rivals, offsets):
+                    margin = [0.0] + list(running[leader] - running[rival])
+                    xs = [0] + list(running.index)
+                    fig.add_trace(go.Scatter(
+                        x=xs, y=margin, mode="lines+markers", name=rival,
+                        line=dict(color=color, width=2.6), marker=dict(size=5, color=color),
+                        hovertemplate=f"{leader} ahead of {rival} by " + "%{y:.0f}<extra></extra>",
+                    ))
+                    fig.add_annotation(
+                        x=xs[-1], y=margin[-1], text=f"<b>vs {rival.replace(' F1 Team', '')}</b>",
+                        showarrow=False, xanchor="left", xshift=8, yshift=-offset, font=dict(size=10.5, color=color),
                     )
-                ])
+                fig.add_hline(y=0, line_color="rgba(255,255,255,0.25)", line_width=1)
+                fig.add_vline(x=round_number, line_color="rgba(255,255,255,0.3)", line_dash="dot", line_width=1)
+                fig.update_xaxes(dtick=2, range=[-0.3, total_rounds + 0.3])
+                fig.update_yaxes(rangemode="tozero")
+
+                short = lambda name: name.replace(" F1 Team", "")
+                if len(names) > 1 and margin_now > available_now:
+                    headline = ("Decided", f"<b>{short(leader)}</b> can't be caught any more", colors[0])
+                elif len(names) > 1:
+                    # The magic number: how much the lead over the runner-up
+                    # still has to grow before nobody can close it.
+                    need = available_now - margin_now + 1
+                    headline = (
+                        f"{need:.0f} <small>pts</small>",
+                        f"on top of the {margin_now:.0f}-point lead <b>{short(leader)}</b> has over "
+                        f"{short(names[1])} · {available_now:.0f} still to play for",
+                        colors[0],
+                    )
+                else:
+                    headline = ("—", "", colors[0])
+                stat_cards([(f"{label} · magic number", *headline)])
+                st.write("")
+                with chart_panel(
+                    f"Can anyone catch {leader.replace(' F1 Team', '')}?",
+                    "Lead over each rival vs. points still available · dotted line: now",
+                    accent=colors[0],
+                ):
+                    plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+                    histories_here = [race_history(progress, entity_col, n) for n in names]
+                    current = [running[n].iloc[-1] for n in names]
+                    odds = simulate_top3_odds(names, current, histories_here, remaining_rounds)
+                    chips(
+                        [(PALETTE["ink_faint"], "Simulated odds")]
+                        + [(c, f"{n.replace(' F1 Team', '')} {format_odds(odds[n] * 100)}")
+                           for n, c in sorted(zip(names, colors), key=lambda p: odds[p[0]], reverse=True)]
+                    )
+
+            top3_drivers = driver_standings.sort_values("position").head(3)
+            names = [
+                r["driverCode"] if pd.notna(r["driverCode"]) else f"{r['givenName']} {r['familyName']}"
+                for _, r in top3_drivers.iterrows()
+            ]
+            histories = [race_history(driver_progress, "Driver", n) for n in names]
+            top3_constructors = constructor_standings.sort_values("position").head(3)
+            names_c = top3_constructors["constructorName"].tolist()
+            histories_c = [race_history(constructor_progress, "Constructor", n) for n in names_c]
+
+            col_drivers_fight, col_constructors_fight = st.columns(2)
+            with col_drivers_fight:
+                # 25 for a win, 8 for a sprint win -- no fastest-lap point
+                # since 2025.
+                title_fight(driver_progress, "Driver", names, [driver_color(n) for n in names], 25, 8, "Drivers'")
+            with col_constructors_fight:
+                # A one-two: 25 + 18, and 8 + 7 in a sprint.
+                title_fight(constructor_progress, "Constructor", names_c, [team_color(n) for n in names_c],
+                            43, 15, "Constructors'")
+            method_note(
+                "**The chart is exact**: the shaded area is the most points anyone could still score -- "
+                "a win in every remaining race, plus every sprint -- and each line is the leader's current "
+                "advantage over one rival. While a line is inside the area, that rival can still mathematically "
+                "win; once it's above, they can't. Ties on points (settled by count-back) are ignored.\n\n"
+                "**The odds are not**: a simplified Monte Carlo limited to the current top 3, each remaining "
+                "race resampled from that driver's (or team's) own points per race so far, independently of "
+                "who else is on track -- so a simulated score never takes points away from a rival the way a "
+                "real race would. Treat them as a feel for how close the fight is, not a forecast.",
+                "How the title maths and the odds are worked out",
+            )
 
             st.write("")
 
@@ -4559,7 +5286,7 @@ if section == SECTION_SEASON:
 
 # ----------------------------------------------------------- season stats --
 
-if section == SECTION_SEASON:
+if section == SECTION_SEASON and showing(tab_season_stats):
     with tab_season_stats:
         section_head(
             "The season so far",
@@ -4744,14 +5471,14 @@ if section == SECTION_SEASON:
                     style_bars(fig_driver_overtakes)
                     plotly_chart(fig_driver_overtakes, width="stretch", config=PLOTLY_CONFIG)
 
-if section == SECTION_SEASON:
+if section == SECTION_SEASON and showing(tab_season_stats):
     with tab_season_stats:
         st.write("")
         render_poles()
 
 # ------------------------------------------------------------- teammates --
 
-if section == SECTION_SEASON:
+if section == SECTION_SEASON and showing(tab_teammates):
     with tab_teammates:
         section_head(
             "Teammate battles",
@@ -4761,12 +5488,6 @@ if section == SECTION_SEASON:
             accent=PALETTE["violet"],
         )
         battles = teammate_battles(year, tuple(schedule["EventName"].tolist()))
-
-        def team_color(name):
-            try:
-                return fastf1.plotting.get_team_color(name, session)
-            except Exception:
-                return "#999999"
 
         short_team = {"Red Bull Racing": "Red Bull", "Haas F1 Team": "Haas"}
         pairs = []
@@ -4920,7 +5641,7 @@ if section == SECTION_SEASON:
 
 # ------------------------------------------------------------ pit stops --
 
-if section == SECTION_SEASON:
+if section == SECTION_SEASON and showing(tab_pits):
     with tab_pits:
         section_head(
             "Pit stops",

@@ -14,14 +14,19 @@ There is no account and no database either way.
 
 ![The race weekend view: headline stats and the race classification](assets/screenshot-weekend.png)
 
+The ghost lap: two drivers' fastest laps raced against each other on the circuit, each car's
+speed, gear and pedals live, and the gap opening and closing as they go:
+
+![Ghost lap](assets/screenshot-ghost-lap.png)
+
 Two drivers' race pace lap by lap, the marker carrying the compound each lap was run on, with
 the cumulative gap between them underneath:
 
 ![Head-to-head race pace](assets/screenshot-pace.png)
 
-And the season view — standings, points progression, title odds:
-
-![The season view](assets/screenshot-season.png)
+Every view is a link: the sidebar choices, the open tab and the drivers being compared are all
+in the URL, so `?gp=Spanish+Grand+Prix&session=Qualifying&tab=head-to-head&drivers=NOR,ANT`
+opens exactly that comparison, and `?view=Season` the championship.
 
 ## Setup
 
@@ -63,25 +68,38 @@ any local run — none of this is used.
   questions at three different sizes: **Race weekend** (one session), **Season** (one
   championship) and **All-time records** (the sport).
   - *Race weekend* opens on a headline strip — winner, fastest lap, speed trap, biggest mover —
-    over one tab per question, in the order a weekend is read. For a race or sprint:
-    **Results** (classification with a places-gained column, every driver's position lap by lap
-    with the podium band shaded, and overtakes, counted pair by pair), **Strategy** (tyre
+    over one tab per question, in the order a weekend is read. The header's circuit is traced from
+    the session's fastest lap and colored by its speed, and a dot laps it at that lap's own rhythm.
+    For a race or sprint:
+    **Results** (a timing-screen classification -- places gained, each driver's tyres as one
+    compound ring per stint, best lap with the race's fastest in purple, the points line, DNFs
+    with the lap they came on -- then *How the race unfolded*, the race told in its moments and
+    built from the data: the start, every change of lead and whether it came on track or in
+    the pits, safety cars, penalties, retirements, the fastest lap and the finish; then every
+    driver's position lap by lap with the podium band and the neutralised laps shaded, and
+    overtakes, counted pair by pair), **Strategy** (tyre
     strategy, and the race's ten fastest pit stops by stationary time from DHL beside the season
     and all-time records), **Pace** (a two-driver head-to-head of every lap time with the
     compound on the marker and the cumulative gap under it, race-pace spread as a box per
-    driver, and fuel-corrected tyre degradation) and **Head-to-head** (the mini-sector track
-    dominance map, the official sector splits as a diverging gap chart, and a five-panel lap
+    driver, and fuel-corrected tyre degradation) and **Head-to-head** (the ghost lap -- the two
+    fastest laps played back side by side on the circuit, in `ghost_lap.py` -- the mini-sector
+    track dominance map, the official sector splits as a diverging gap chart, and a five-panel lap
     trace — speed, delta, throttle, brake, gear — with x-linked axes, so zooming one panel zooms
-    all five). Qualifying has **Results**, **Stats** (gap to pole, time lost against each
+    all five). Qualifying has **Results** (Q1/Q2/Q3 with each part's fastest in purple and the
+    knockout zones marked), **Stats** (gap to pole, time lost against each
     driver's ideal lap, each team's top speed against its average corner speed) and
-    **Head-to-head**; practice has Results, Pace and Head-to-head.
+    **Head-to-head**; practice has Results (best lap, the tyre it was set on, gap as a bar), Pace
+    and Head-to-head. Only the open tab is computed: switching tabs reruns just that one.
     The session dropdown is built from that weekend's real `Session1..5` names in the FastF1
     schedule, so Sprint Qualifying/Sprint show up only on sprint weekends. Delta time is computed
     by interpolating the other lap's elapsed time onto the reference lap's distance grid with
     `numpy.interp`, rather than `fastf1.utils.delta_time`, which the library's own docs flag as
     deprecated and not very accurate.
-  - *Season* has **Championship** (both standings tables, points progression with the leader's
-    line filled, Monte-Carlo title odds as donuts, and a clinch-round estimate) and **Race by
+  - *Season* has **Championship** (both standings tables with the gap to the leader, places
+    moved since the round before and the last five rounds as a small bar chart; points
+    progression with the leader's line filled; the title fight -- the leader's margin over each
+    rival against the points still available, which is exact arithmetic, with the magic number
+    and the Monte-Carlo odds beside it; and a clinch-round estimate) and **Race by
     race** (season records, a points-per-race heatmap of every scoring driver against every
     round, overtakes by race and by driver, and poles by driver and by engine), **Teammates** (every pairing's qualifying,
     race and points head-to-head with the median qualifying gap, then one pairing race by race:
@@ -107,8 +125,11 @@ carries an in-plot title, and the long methodology notes — how an overtake is 
 title-odds simulation actually does — live in collapsed expanders instead of as paragraphs of
 body copy above the chart they explain. Typography is Titillium Web (the closest freely-licensed
 stand-in for Formula 1's own proprietary face) with JetBrains Mono for every lap time and gap.
+Team colors are the teams' own, lifted in lightness where they fall under 3:1 contrast on the
+dark panels (`readable()`: Red Bull's `#0600ef`, Cadillac's `#444444` and Aston Martin's
+`#00665f` were close to invisible there), hue unchanged.
 
-Two things to know before editing that stylesheet:
+Three things to know before editing that stylesheet:
 
 - Streamlit's DOM isn't ours, so selectors use `data-testid` and ARIA attributes only. The
   `st-emotion-cache-*` class names are content hashes that change on every Streamlit build, and
@@ -118,3 +139,6 @@ Two things to know before editing that stylesheet:
 - The app-wide font rule has to exempt `[data-testid="stIconMaterial"]`. Streamlit draws its
   chevrons and arrows as ligatures in a Material Symbols font, and overriding that font renders
   every icon as its own name spelled out ("keyboard_arrow_right").
+- That same rule matches on `[class*="st-"]`, so any class of ours containing "st-" picks up the
+  display font too: `fastest-lap` did, and the purple lap times came out in Titillium instead of
+  the mono. Name classes so they don't contain it (`purple-lap`).
