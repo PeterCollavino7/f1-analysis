@@ -1,0 +1,23 @@
+# Streamlit Community Cloud puts an app to sleep after 12 hours without a
+# visit. This visits it every four hours -- scheduled runs can start late,
+# so the margin is deliberate -- and wakes it if it fell asleep anyway.
+# Runs in GitHub's cloud, so it doesn't depend on the home PC being on.
+# See keep_awake.py.
+name: Keep the app awake
+
+on:
+  schedule:
+    - cron: "23 */4 * * *"
+  workflow_dispatch:
+
+jobs:
+  visit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install "selenium>=4.20"
+      - run: python keep_awake.py
