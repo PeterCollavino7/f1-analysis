@@ -969,7 +969,7 @@ st.markdown(
     .gapcell { display: flex; align-items: center; gap: 0.7rem; }
     .gapcell span { min-width: 4.3rem; }
     .gapcell b { flex: 1; max-width: 8rem; height: 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.05); }
-    .gapcell i { display: block; height: 100%; border-radius: 3px; background: var(--gc); opacity: 0.8; }
+    .gapcell i { display: block; height: 100%; border-radius: 3px; background: rgba(255, 255, 255, 0.34); }
     /* Last five rounds as a tiny bar chart in a standings row: form, which a
        season total hides. */
     .formbars { display: inline-flex; align-items: flex-end; gap: 3px; height: 22px; vertical-align: middle; }
@@ -1069,6 +1069,9 @@ st.markdown(
        stylesheet so it overrides the desktop rules above it. */
     @media (max-width: 640px) {
         .block-container { padding-left: 0.75rem; padding-right: 0.75rem; padding-top: 3.2rem; }
+        /* No room for the gap bars on a phone: the number stays. */
+        .gapcell b { display: none; }
+        .gapcell span { min-width: 0; }
         /* The header stacks: beside the text, the circuit squeezed a Grand
            Prix name onto three lines. */
         .hero { flex-direction: column; align-items: stretch; padding: 1.2rem 1.2rem 1rem; }
@@ -4966,9 +4969,13 @@ def best_lap_cell(lap_time, overall_best):
     return f'<span class="purple-lap">{text}</span>' if lap_time == overall_best else text
 
 
-def gap_bar_cell(text, gap_seconds, widest, color):
+def gap_bar_cell(text, gap_seconds, widest):
+    # The bar's length is the information -- how the field spreads out
+    # behind P1, which a column of numbers doesn't show at a glance. It is
+    # one neutral grey: in team colours it repeated the stripe and the number
+    # badge on the same row and turned the column into a rainbow.
     width = 0 if not widest else min(100, 100 * gap_seconds / widest)
-    return f'<div class="gapcell"><span>{text}</span><b><i style="width:{width:.1f}%;--gc:{color}"></i></b></div>'
+    return f'<div class="gapcell"><span>{text}</span><b><i style="width:{width:.1f}%"></i></b></div>'
 
 
 def render_classification():
@@ -5018,7 +5025,7 @@ def render_classification():
                 "tyre": (f'<span class="tyres"><span class="tyre" style="--tc:'
                          f'{COMPOUND_COLORS.get(compound, "#8a8f98")}" title="{compound.title()}">'
                          f'{COMPOUND_LETTER.get(compound, "?")}</span></span>'),
-                "gap": gap_bar_cell("—" if rank == 1 else f"+{gap:.3f}", gap, widest, color),
+                "gap": gap_bar_cell("—" if rank == 1 else f"+{gap:.3f}", gap, widest),
                 "laps": str(int(laps_run.get(driver, 0))),
             })
         with chart_panel("Session ranking", "By best lap · the ring is the tyre it was set on",
