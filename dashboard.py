@@ -120,6 +120,10 @@ COMPOUND_COLORS = {
     "INTERMEDIATE": "#43b02a",
     "WET": "#0067ad",
 }
+# The letter in a tyre ring. Up here with the colours rather than beside the
+# classification: the Pace tab's long-run table draws rings too, and it runs
+# earlier in the script than the function that used to define this.
+COMPOUND_LETTER = {"SOFT": "S", "MEDIUM": "M", "HARD": "H", "INTERMEDIATE": "I", "WET": "W"}
 
 # The same values as the CSS custom properties in the stylesheet above --
 # Plotly draws its figures from Python and never sees the page's CSS, so the
@@ -2331,15 +2335,22 @@ def format_race_gap(row, leader_laps):
 
 
 def order_by_classification(session, drivers):
-    """Finishing/classification order (P1 first) when available -- falls
-    back to alphabetical for sessions with no classification yet, like
-    Practice, or for any driver missing from it."""
+    """Finishing/classification order (P1 first) when available. Practice
+    has no classification, so there -- and for any driver missing from it --
+    the order is by best lap, as a timing screen ranks a practice session.
+    It used to fall back to alphabetical, which made every chart that opens
+    on "the top two" open on Albon against Alonso."""
     try:
         pos = session.results.set_index("Abbreviation")["Position"].dropna()
         ordered = [d for d in pos.sort_values().index if d in drivers]
     except Exception:
         ordered = []
-    remaining = sorted(d for d in drivers if d not in ordered)
+    remaining = [d for d in drivers if d not in ordered]
+    try:
+        best = session.laps.groupby("Driver")["LapTime"].min()
+    except Exception:
+        best = pd.Series(dtype="timedelta64[ns]")
+    remaining.sort(key=lambda d: (pd.isna(best.get(d)), best.get(d) if pd.notna(best.get(d)) else pd.Timedelta(0), d))
     return ordered + remaining
 
 
@@ -2962,7 +2973,12 @@ def driver_picker(name, label, help_text, eligible, on_pick=None, limit=MAX_DRIV
     pick. Here every driver is in view, one click toggles, and a third pick
     replaces the older of the two.
 
-    Starts empty (a choice, not whichever two come first). The widget key
+    Never starts empty: with no `default` it opens on the top of the session
+    (P1 and P2, or P1 alone for a one-driver picker), so every chart behind
+    a picker is already drawn when the tab opens. It used to start empty on
+    principle ("a choice, not whichever two come first"), which left the
+    ghost lap -- the app's best view -- behind a blank prompt; Peter reversed
+    that on 2026-09-24. The widget key
     carries the session, but with share=True the pair also lives in the URL
     (?drivers=VER,NOR), so it follows the reader to another session or race
     -- qualifying, then the race, same two drivers -- minus anyone the new
@@ -2980,6 +2996,8 @@ def driver_picker(name, label, help_text, eligible, on_pick=None, limit=MAX_DRIV
 
     key = picker_key(name)
     history_key = key + "_order"
+    if not default:
+        default = order_by_classification(session, list(eligible))[:limit]
 
     def keep_newest_two():
         # st.pills has no max_selections, and it reports the selection in
@@ -4121,6 +4139,121 @@ def render_overtakes():
     st.write("")
 
 
+# A long run: at least this many consecutive laps on one set of tyres, none
+# under safety car, VSC or red flag, none an in- or out-lap, none slower than LONG_RUN_WINDOW times
+# the driver's own best. Five is what a team calls a race simulation at the
+# shortest; 107% keeps race-pace laps and drops the cool-down laps practice
+# is full of, and because the laps must be consecutive, one cool-down lap
+# ends a run instead of hiding inside it.
+LONG_RUN_MIN_LAPS = 5
+LONG_RUN_WINDOW = 1.07
+
+
+def find_long_runs(laps):
+    """[(driver, laps of one run)] for every long run in the session."""
+    laps = laps.dropna(subset=["LapTime", "LapNumber", "Stint"])
+    laps = laps[laps["PitInTime"].isna() & laps["PitOutTime"].isna()]
+    runs = []
+    for driver, driver_laps in laps.groupby("Driver"):
+        best = driver_laps["LapTime"].min()
+        # Neutralised laps are out (4 safety car, 5 red flag, 6/7 VSC); a
+        # yellow (2) is not -- practice is full of local yellows, and
+        # requiring pure green broke Leclerc's Baku FP2 run in half.
+        neutralised = driver_laps["TrackStatus"].astype(str).str.contains("[4567]", regex=True)
+        usable = driver_laps[(driver_laps["LapTime"] <= best * LONG_RUN_WINDOW) & ~neutralised]
+        for _, stint in usable.groupby("Stint"):
+            stint = stint.sort_values("LapNumber")
+            block = (stint["LapNumber"].diff() != 1).cumsum()
+            for _, run in stint.groupby(block):
+                if len(run) >= LONG_RUN_MIN_LAPS:
+                    runs.append((driver, run))
+    return runs
+
+
+def render_long_runs():
+    """Practice's answer to "who has race pace": each driver's longest run,
+    ranked by its typical lap. It replaces the lap-by-lap race-pace chart in
+    practice, where every other lap is a cool-down and the line zigzagged
+    between 1:50 and 2:25 -- the run programme, not pace. On a Friday this is
+    the number the paddock argues about."""
+    runs = find_long_runs(session.laps)
+    with chart_panel(
+        "Long runs",
+        f"Each driver's longest run: {LONG_RUN_MIN_LAPS}+ consecutive laps on one set of tyres, "
+        "cool-down and neutralised laps excluded",
+        accent=PALETTE["blue"],
+    ):
+        if not runs:
+            empty_state(
+                f"No long runs in this session -- nobody did {LONG_RUN_MIN_LAPS} clean laps "
+                "in a row on one set of tyres"
+            )
+            return
+        longest = {}
+        for driver, run in runs:
+            seconds = run["LapTime"].dt.total_seconds()
+            candidate = (len(run), -seconds.median(), run)
+            if driver not in longest or candidate[:2] > longest[driver][:2]:
+                longest[driver] = candidate
+        results = session.results
+        team_by_driver = results.set_index("Abbreviation")["TeamName"] if not results.empty else {}
+        number_by_driver = results.set_index("Abbreviation")["DriverNumber"] if not results.empty else {}
+        summary = []
+        for driver, (_, _, run) in longest.items():
+            seconds = run["LapTime"].dt.total_seconds().to_numpy()
+            # Slope of a straight line through the run: tyre wear pushes it
+            # up, fuel burning off pulls it down, and on a Friday nobody
+            # outside the team knows the fuel load, so it's shown as it is.
+            trend = float(np.polyfit(np.arange(len(seconds)), seconds, 1)[0])
+            known = run["Compound"].dropna()
+            summary.append({
+                "driver": driver,
+                "median": float(np.median(seconds)),
+                "laps": len(seconds),
+                "trend": trend,
+                "compound": str(known.iloc[0]) if len(known) else "UNKNOWN",
+                "first": int(run["LapNumber"].min()),
+                "last": int(run["LapNumber"].max()),
+            })
+        summary.sort(key=lambda r: r["median"])
+        fastest = summary[0]["median"]
+        rows = []
+        for rank, r in enumerate(summary, start=1):
+            color = safe_driver_color(r["driver"], session)
+            compound = r["compound"]
+            rows.append({
+                "badge": driver_number_badge(number_by_driver.get(r["driver"], "—"), color),
+                "color": color,
+                "pos": rank,
+                "driver": r["driver"],
+                "team": team_by_driver.get(r["driver"], ""),
+                "tyre": (f'<span class="tyres"><span class="tyre" style="--tc:'
+                         f'{COMPOUND_COLORS.get(compound, "#8a8f98")}" '
+                         f'title="{compound.title()} · laps {r["first"]}–{r["last"]}">'
+                         f'{COMPOUND_LETTER.get(compound, "?")}</span></span>'),
+                "median": format_lap_time(pd.Timedelta(seconds=r["median"])),
+                "gap": "—" if rank == 1 else f"+{r['median'] - fastest:.3f}",
+                "laps": str(r["laps"]),
+                "trend": f"{r['trend']:+.2f} s/lap",
+            })
+        render_table(rows, [
+            ("pos", "Pos", "pos"), ("driver", "Driver", "name"), ("team", "Team", "team"),
+            ("tyre", "Tyre", "tyrecol"), ("median", "Typical lap", "mono"), ("gap", "Gap", "mono"),
+            ("laps", "Laps", "num"), ("trend", "Trend", "mono"),
+        ])
+    method_note(
+        f"A long run is at least {LONG_RUN_MIN_LAPS} consecutive laps on one set of tyres, none "
+        "under safety car, VSC or red flag (local yellows are fine), none an in- or out-lap, and none slower than 107% of the driver's own "
+        "best lap -- which is what drops the cool-down laps between pushes. Each driver's longest "
+        "run is shown; the typical lap is its median, so one lap in traffic doesn't move it. "
+        "**Compounds aren't like for like**: the ring is the tyre the run was on, and a medium "
+        "run a few tenths behind a soft one may be the better pace. **Trend** is the slope of "
+        "the run's lap times: tyre wear pushes it up, fuel burning off pulls it down, and the "
+        "fuel load is the team's secret, so it's shown uncorrected.",
+        "How long runs are found",
+    )
+
+
 def render_pace_tab():
     """Who was quick: two drivers lap by lap, the field's spread of lap
     times, and how fast each compound wore."""
@@ -4132,7 +4265,12 @@ def render_pace_tab():
     # do and couldn't (its x axis is tyre life, so two drivers on different
     # strategies get laid on top of each other out of sequence).
     h2h_laps = session.laps.dropna(subset=["LapTime", "LapNumber"])
-    if not h2h_laps.empty and h2h_laps["Driver"].nunique() >= 2:
+    if session_name.startswith("Practice"):
+        # Practice isn't raced: lap by lap it's pushes and cool-downs, so the
+        # comparison there is long runs instead.
+        render_long_runs()
+        st.write("")
+    elif not h2h_laps.empty and h2h_laps["Driver"].nunique() >= 2:
         # Opens on the winner against the runner-up, so the chart is there
         # from the start rather than behind a choice; the pills live in a
         # popover inside the panel and close themselves on each pick (a new
@@ -4421,9 +4559,12 @@ def render_pace_tab():
         # permanent driver picker on this tab was one too many. The figure is
         # built before that popover is drawn, so the choice is read straight
         # from session state -- a widget's new value is already there when
-        # the rerun it triggered starts.
+        # the rerun it triggered starts. Before anyone has picked, it is the
+        # picker's own default -- the session's leader -- so the laps are on
+        # the chart from the first render, not only after a click.
+        laps_default = order_by_classification(session, pace_driver_options)[:1]
         pace_drivers = [
-            d for d in st.session_state.get(picker_key("laps") + "_order", []) if d in pace_driver_options
+            d for d in st.session_state.get(picker_key("laps") + "_order", laps_default) if d in pace_driver_options
         ]
 
         fig_pace = base_figure("", "Lap time (s), fuel-corrected", "Tyre life (laps)")
@@ -4800,9 +4941,6 @@ def render_race_story():
                      accent="#ffcf4a"):
         st.markdown("".join(strip) + f'<div class="story-list">{items}</div>', unsafe_allow_html=True)
     st.write("")
-
-
-COMPOUND_LETTER = {"SOFT": "S", "MEDIUM": "M", "HARD": "H", "INTERMEDIATE": "I", "WET": "W"}
 
 
 def tyre_rings(driver_laps):
