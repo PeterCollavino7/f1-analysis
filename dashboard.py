@@ -3995,6 +3995,13 @@ if section == SECTION_WEEKEND:
                 accent=PALETTE["blue"],
             )
             fastest = session.laps.groupby("Driver")["LapTime"].min().dropna().sort_values()
+            # Laps completed, beside the time -- a practice ranking without it
+            # says who was quick but not who was working: a 1:45.4 on lap 3 of
+            # 28 and the same time as a driver's only flying lap are different
+            # sessions. Every row of session.laps is a lap the driver crossed
+            # the line on, in and out laps included, which is the same count a
+            # timing screen shows.
+            laps_run = session.laps.groupby("Driver").size()
             team_by_driver = results.set_index("Abbreviation")["TeamName"] if not results.empty else {}
             number_by_driver = results.set_index("Abbreviation")["DriverNumber"] if not results.empty else {}
             rows = [
@@ -4008,13 +4015,14 @@ if section == SECTION_WEEKEND:
                     "team": team_by_driver.get(driver, ""),
                     "best": format_lap_time(lap_time),
                     "gap": "—" if rank == 1 else f"+{(lap_time - fastest.iloc[0]).total_seconds():.3f}",
+                    "laps": str(int(laps_run.get(driver, 0))),
                 }
                 for rank, (driver, lap_time) in enumerate(fastest.items(), start=1)
             ]
             with chart_panel("Session ranking", "By best lap", accent=PALETTE["blue"]):
                 render_table(rows, [
                     ("pos", "Pos", "pos"), ("driver", "Driver", "name"), ("team", "Team", "team"),
-                    ("best", "Best lap", "mono"), ("gap", "Gap", "mono"),
+                    ("best", "Best lap", "mono"), ("gap", "Gap", "mono"), ("laps", "Laps", "num"),
                 ])
         else:
             has_quali_times = results[["Q1", "Q2", "Q3"]].notna().any().any()
