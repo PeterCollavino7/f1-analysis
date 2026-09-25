@@ -3080,49 +3080,6 @@ def driver_picker(name, label, help_text, eligible, on_pick=None, limit=MAX_DRIV
     return selected
 
 
-# Clipping: the 2026 cars run out of electrical deployment before the end of
-# a long straight, and from there the car slows with the throttle still
-# pinned. The timing feed carries no battery channel at all (checked in
-# FastF1's car data and in OpenF1's API: speed, RPM, gear, throttle, brake,
-# DRS, nothing else), so this is read off what the car does instead.
-# Measured on Baku FP2 2026: the four quickest laps lost 15-19 km/h over the
-# last 7-9 s of the main straight at full throttle. A flat-out *corner* loses
-# speed too (the castle kink, 23 degrees of heading, dropped 27 km/h), which
-# is why the stretch also has to run straight.
-CLIP_MIN_THROTTLE = 98      # % -- "full throttle", allowing for sensor noise
-CLIP_MIN_LOSS = 5           # km/h lost from the peak -- under that is quantisation
-CLIP_MIN_SECONDS = 1.5      # a shorter dip is a gear change or a sample edge
-CLIP_MAX_HEADING = 10       # degrees of net direction change: a straight, not a kink
-
-
-def find_clipping(distance_m, speed, throttle, brake, elapsed, heading_deg):
-    """Stretches of one lap where the car loses speed at full throttle on a
-    straight, as (start_index, end_index, km/h lost, seconds) on the shared
-    distance grid. Each full-throttle stretch gives at most one: from its
-    peak speed to the lowest speed after it."""
-    full = (throttle >= CLIP_MIN_THROTTLE) & (brake == 0)
-    found = []
-    i, n = 0, len(full)
-    while i < n:
-        if not full[i]:
-            i += 1
-            continue
-        j = i
-        while j + 1 < n and full[j + 1]:
-            j += 1
-        peak = i + int(np.argmax(speed[i:j + 1]))
-        low = peak + int(np.argmin(speed[peak:j + 1]))
-        loss = float(speed[peak] - speed[low])
-        seconds = float(elapsed[low] - elapsed[peak])
-        if (
-            loss >= CLIP_MIN_LOSS and seconds >= CLIP_MIN_SECONDS
-            and abs(heading_deg[low] - heading_deg[peak]) <= CLIP_MAX_HEADING
-        ):
-            found.append((peak, low, loss, seconds))
-        i = j + 1
-    return found
-
-
 def render_telemetry_tab():
     """Head-to-head telemetry for the two selected drivers.
 
@@ -3308,26 +3265,6 @@ def render_telemetry_tab():
             "nGear": resample_step(tel, "nGear"),
             "Elapsed": elapsed_resampled,
         }
-
-    # Where each car runs out of battery, read off speed and throttle (see
-    # find_clipping). The track's direction comes from the first driver's
-    # lap -- the same road for both, and a few metres of distance drift
-    # don't matter to a 10-degree test -- smoothed over ~30 m so position
-    # noise doesn't read as steering.
-    clipping = {}
-    try:
-        geometry = laps_by_driver[selected_drivers[0]].get_telemetry()
-        gx = resample_linear(geometry, "X")
-        gy = resample_linear(geometry, "Y")
-        heading = np.degrees(np.unwrap(np.arctan2(np.gradient(gy), np.gradient(gx))))
-        heading = pd.Series(heading).rolling(15, center=True, min_periods=1).mean().to_numpy()
-        for driver in selected_drivers:
-            r = resampled[driver]
-            clipping[driver] = find_clipping(
-                common_distance_m, r["Speed"], r["Throttle"], r["Brake"], r["Elapsed"], heading,
-            )
-    except Exception:
-        clipping = {}
 
     if len(selected_drivers) < 2:
         empty_state("Pick a second driver to see where on the lap each one is faster", "prompt")
@@ -3613,20 +3550,6 @@ def render_telemetry_tab():
             ),
             row=1, col=1,
         )
-        # Clipping drawn as a wide, faint band under the driver's own speed
-        # line: it marks the stretch without hiding the line itself.
-        if clipping.get(driver):
-            band = np.full(len(speed), np.nan)
-            for start, end, _loss, _seconds in clipping[driver]:
-                band[start:end + 1] = speed[start:end + 1]
-            fig_telemetry.add_trace(
-                go.Scatter(
-                    x=common_distance_labels, y=band, name=f"{driver} clipping", showlegend=False,
-                    line=dict(color=hex_to_rgba(color, 0.5), width=14), connectgaps=False,
-                    hoverinfo="skip",
-                ),
-                row=1, col=1,
-            )
         if driver != reference_driver:
             delta = resampled[driver]["Elapsed"] - ref_elapsed
             # Linear interpolation between ~200ms-apart telemetry samples
@@ -3719,47 +3642,6 @@ def render_telemetry_tab():
         accent=PALETTE["blue"],
     ):
         plotly_chart(fig_telemetry, width="stretch", config=PLOTLY_CONFIG)
-
-    if clipping:
-        speed_factor = KM_TO_MI if imperial else 1
-        dist_factor = M_TO_FT if imperial else 1
-        with chart_panel(
-            "Running out of battery",
-            "Where the car slows with the throttle still flat out · the shaded band on the speed trace",
-            accent=PALETTE["blue"],
-        ):
-            rows = []
-            for driver in selected_drivers:
-                for start, end, loss, seconds in clipping.get(driver, []):
-                    rows.append({
-                        "driver": driver, "color": driver_style[driver][0],
-                        "where": (
-                            f"{common_distance_m[start] * dist_factor:,.0f}–"
-                            f"{common_distance_m[end] * dist_factor:,.0f} {dist_unit}"
-                        ),
-                        "lost": f"−{loss * speed_factor:.0f} {speed_unit}",
-                        "over": f"{seconds:.1f} s",
-                        "podium": False,
-                    })
-            if rows:
-                render_table(rows, [
-                    ("driver", "Driver", "name"), ("where", "Where", "mono"),
-                    ("lost", "Speed lost", "mono"), ("over", "Over", "mono"),
-                ])
-            else:
-                empty_state("No stretch of these laps where the car slowed at full throttle on a straight", "note")
-        method_note(
-            "The timing feed has **no battery data** -- the state of charge seen on TV graphics isn't "
-            "in the public feed, and no free source carries it. What the feed does show is its "
-            "consequence: once the electrical deployment runs out on a straight, the car stops "
-            "accelerating and starts to slow even though the throttle is still flat out. A stretch "
-            f"counts when the throttle stays at {CLIP_MIN_THROTTLE}% or more with no brake, the car "
-            f"loses at least {CLIP_MIN_LOSS} km/h from its peak over {CLIP_MIN_SECONDS:g} s or more, "
-            f"and the road turns less than {CLIP_MAX_HEADING}° over it -- a flat-out corner scrubs "
-            "speed too, and that's grip, not battery. Where the band starts is roughly where the "
-            "battery gave out; a driver who saved energy earlier in the lap clips later or not at all.",
-            "How clipping is spotted",
-        )
 
 
 if section == SECTION_WEEKEND and showing(tab_telemetry):
