@@ -3832,8 +3832,10 @@ def render_quali_stats():
     sector_cols = ["Sector1Time", "Sector2Time", "Sector3Time"]
     sectors = timed.groupby("Driver")[sector_cols].min().apply(lambda c: c.dt.total_seconds())
     sectors = sectors.reindex(best.index)
-    ideal = sectors.sum(axis=1, min_count=3)
 
+    # Sectors only: the gap to pole and the time left on the table were
+    # columns here too, the same numbers as the two bar charts below. The
+    # table says where on the lap the time was, the bars say how much.
     with chart_panel(
         "Sector map",
         "Each driver's best time in each sector against the session's best · purple is the fastest",
@@ -3842,24 +3844,18 @@ def render_quali_stats():
         session_best = sectors.min()
         widest = {c: (sectors[c] - session_best[c]).max() for c in sector_cols}
         rows = []
-        for rank, (driver, lap) in enumerate(best.items(), start=1):
-            row = {
-                "pos": str(rank), "driver": driver, "color": safe_driver_color(driver, session),
-                "lap": format_lap_time(pd.Timedelta(seconds=lap)) if rank == 1 else f"+{lap - best.iloc[0]:.3f}",
-            }
+        for rank, driver in enumerate(best.index, start=1):
+            row = {"pos": str(rank), "driver": driver, "color": safe_driver_color(driver, session)}
             for i, col in enumerate(sector_cols, start=1):
                 value = sectors.at[driver, col]
                 if pd.notna(value) and value == session_best[col]:
                     row[f"s{i}"] = f'<span class="sectile best">{value:.3f}</span>'
                 else:
                     row[f"s{i}"] = sector_tile(value - session_best[col], widest[col])
-            unused = lap - ideal.get(driver, np.nan)
-            row["unused"] = "—" if pd.isna(unused) else f"{max(0.0, unused):.3f}"
             rows.append(row)
         render_table(rows, [
-            ("pos", "Pos", "pos"), ("driver", "Driver", "name"), ("lap", "Best lap", "mono"),
+            ("pos", "Pos", "pos"), ("driver", "Driver", "name"),
             ("s1", "Sector 1", "sector"), ("s2", "Sector 2", "sector"), ("s3", "Sector 3", "sector"),
-            ("unused", "Time left", "mono"),
         ])
 
     st.write("")
