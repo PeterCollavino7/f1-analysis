@@ -903,6 +903,16 @@ st.markdown(
         color: rgba(232, 235, 239, 0.92);
     }
     table.standings td.status { color: var(--ink-faint); font-size: 0.82rem; }
+    /* Qualifying sector map: each sector gap is a tile whose strength says
+       how close it was to the session's best sector -- one blue ramp, bright
+       near the best and fading out -- with the best itself in the timing
+       screens' purple. */
+    table.standings td.sector { text-align: center; padding-left: 0.3rem; padding-right: 0.3rem; }
+    .sectile {
+        display: inline-block; min-width: 4.9em; padding: 0.22rem 0.4rem; border-radius: 5px;
+        font-family: var(--mono); font-size: 0.8rem; color: #eef1f5; background: var(--heat);
+    }
+    .sectile.best { background: #8e44ff; font-weight: 700; }
     /* Places gained/lost on the results table: a signed number that carries
        its own color instead of needing a legend. */
     table.standings td.delta { text-align: right; width: 4.6rem; font-weight: 700; font-size: 0.85rem; }
@@ -3786,9 +3796,28 @@ def render_position_chart():
             plotly_chart(fig_position, width="stretch", config=PLOTLY_CONFIG)
 
 
+def sector_tile(gap, widest):
+    """One sector cell of the qualifying sector map: the gap to the
+    session's best sector on a blue tile that fades the further it is from
+    that best (the best itself is drawn by the caller, in purple)."""
+    if pd.isna(gap):
+        return "—"
+    # Scaled to 0.8 s at most: one slow driver (a lap aborted in Q1, say)
+    # would otherwise stretch the ramp so far that the front of the field all
+    # read the same bright blue.
+    scale = min(widest, 0.8) if widest else 0.8
+    strength = 1 - min(1.0, gap / scale)
+    alpha = 0.05 + 0.75 * strength ** 2.2
+    return f'<span class="sectile" style="--heat:rgba(91,140,255,{alpha:.2f})">+{gap:.3f}</span>'
+
+
 def render_quali_stats():
-    """Gap to pole and ideal lap, the two numbers a qualifying session is
-    read by. Deleted laps (track limits) are left out of both: a lap that
+    """Qualifying read three ways: where on the lap each driver was quick
+    (the sector map), how the session played out part by part
+    (Q1 -> Q2 -> Q3), and who left time on the table (best lap against
+    ideal lap). These replaced two bar charts -- gap to pole and time left
+    on the table -- that ranked the same drivers in the same order, which
+    Peter found flat. Deleted laps (track limits) are left out: a lap that
     didn't count for the grid shouldn't count here either."""
     laps = session.laps
     if "Deleted" in laps.columns:
@@ -3798,60 +3827,192 @@ def render_quali_stats():
         empty_state("No timed laps in this session")
         return
     best = timed.groupby("Driver")["LapTime"].min().dt.total_seconds().sort_values()
-    order = list(reversed(best.index))  # fastest at the top of a horizontal bar chart
-    colors = [safe_driver_color(d, session) for d in order]
+    sector_cols = ["Sector1Time", "Sector2Time", "Sector3Time"]
+    sectors = timed.groupby("Driver")[sector_cols].min().apply(lambda c: c.dt.total_seconds())
+    sectors = sectors.reindex(best.index)
+    ideal = sectors.sum(axis=1, min_count=3)
 
-    col_gap, col_ideal = st.columns(2)
-    with col_gap:
-        with chart_panel("Gap to pole", "Each driver's best lap, behind the fastest", accent=PALETTE["red"]):
-            gap = (best - best.iloc[0])[order]
-            fig_gap = base_figure("", "", "Seconds behind")
-            fig_gap.update_layout(showlegend=False)
-            fig_gap.update_yaxes(tickfont=dict(size=11))
-            fig_gap.add_trace(
-                go.Bar(
-                    x=gap.to_numpy(), y=order, orientation="h",
-                    marker=dict(color=colors, line=dict(color="rgba(255,255,255,0.10)", width=1)),
-                    text=["POLE" if g == 0 else f"+{g:.3f}" for g in gap], textposition="outside", cliponaxis=False,
-                    hovertemplate="%{y}: +%{x:.3f} s<extra></extra>",
-                )
-            )
-            size_horizontal_bars(fig_gap, gap.to_numpy(), row_px=26, bar_px=16)
-            style_bars(fig_gap)
-            plotly_chart(fig_gap, width="stretch", config=PLOTLY_CONFIG)
+    with chart_panel(
+        "Sector map",
+        "Each driver's best time in each sector against the session's best · purple is the fastest",
+        accent=PALETTE["violet"],
+    ):
+        session_best = sectors.min()
+        widest = {c: (sectors[c] - session_best[c]).max() for c in sector_cols}
+        rows = []
+        for rank, (driver, lap) in enumerate(best.items(), start=1):
+            row = {
+                "pos": str(rank), "driver": driver, "color": safe_driver_color(driver, session),
+                "lap": format_lap_time(pd.Timedelta(seconds=lap)) if rank == 1 else f"+{lap - best.iloc[0]:.3f}",
+            }
+            for i, col in enumerate(sector_cols, start=1):
+                value = sectors.at[driver, col]
+                if pd.notna(value) and value == session_best[col]:
+                    row[f"s{i}"] = f'<span class="sectile best">{value:.3f}</span>'
+                else:
+                    row[f"s{i}"] = sector_tile(value - session_best[col], widest[col])
+            unused = lap - ideal.get(driver, np.nan)
+            row["unused"] = "—" if pd.isna(unused) else f"{max(0.0, unused):.3f}"
+            rows.append(row)
+        render_table(rows, [
+            ("pos", "Pos", "pos"), ("driver", "Driver", "name"), ("lap", "Best lap", "mono"),
+            ("s1", "Sector 1", "sector"), ("s2", "Sector 2", "sector"), ("s3", "Sector 3", "sector"),
+            ("unused", "Time left", "mono"),
+        ])
+
+    st.write("")
+    col_segments, col_ideal = st.columns(2)
+
+    with col_segments:
+        results = session.results if session.results is not None else pd.DataFrame()
+        has_segments = (
+            not results.empty and {"Q1", "Q2", "Q3"} <= set(results.columns)
+            and results[["Q1", "Q2", "Q3"]].notna().any().any()
+        )
+        with chart_panel(
+            "Q1 → Q2 → Q3",
+            "Each driver's best time in every part they ran · the knocked-out carry their miss",
+            accent=PALETTE["red"],
+        ):
+            if has_segments:
+                render_quali_segments(results)
+            else:
+                empty_state("No Q1/Q2/Q3 split for this session", "note")
 
     with col_ideal:
         with chart_panel(
-            "Time left on the table", "Best lap minus the sum of the driver's best sectors",
+            "The ideal-lap order",
+            "Ranked on best lap, then on the sum of each driver's best sectors",
             accent=PALETTE["amber"],
         ):
-            sectors = timed.groupby("Driver")[["Sector1Time", "Sector2Time", "Sector3Time"]].min()
-            ideal = sectors.sum(axis=1, min_count=3).dt.total_seconds()
-            lost = (best - ideal).dropna().clip(lower=0)
-            lost = lost.reindex([d for d in order if d in lost.index])
-            fig_ideal = base_figure("", "", "Seconds")
-            fig_ideal.update_layout(showlegend=False)
-            fig_ideal.update_yaxes(tickfont=dict(size=11))
-            fig_ideal.add_trace(
-                go.Bar(
-                    x=lost.to_numpy(), y=list(lost.index), orientation="h",
-                    marker=dict(
-                        color=[safe_driver_color(d, session) for d in lost.index],
-                        line=dict(color="rgba(255,255,255,0.10)", width=1),
-                    ),
-                    text=[f"{v:.3f}" for v in lost], textposition="outside", cliponaxis=False,
-                    hovertemplate="%{y}: %{x:.3f} s off their ideal lap<extra></extra>",
-                )
-            )
-            size_horizontal_bars(fig_ideal, lost.to_numpy(), row_px=26, bar_px=16)
-            style_bars(fig_ideal)
-            plotly_chart(fig_ideal, width="stretch", config=PLOTLY_CONFIG)
+            render_ideal_order(best, ideal)
+
     method_note(
-        "**Ideal lap** is the sum of a driver's three best sector times, wherever in the "
-        "session each was set. The bar is how much slower their best actual lap was than that "
-        "-- a driver who strung their best sectors together on one lap scores zero. Drivers "
-        "stay in order of their best lap, as in the gap chart beside it, so the two read row by row."
+        "**Sector map**: each driver's best time in each of the three sectors, wherever in the "
+        "session it was set, shown as the gap to the session's best in that sector -- the stronger "
+        "the blue, the closer. **Time left** is the best lap minus the ideal lap, the sum of those "
+        "three best sectors; a driver who strung them together on one lap scores zero. "
+        "**Q1 → Q2 → Q3** uses the official times for each part; the dotted lines are the cuts, "
+        "and a knocked-out driver carries the margin they missed the cut by. **The ideal-lap "
+        "order** re-ranks the field on ideal laps: a line that climbs is a driver whose best lap "
+        "undersold what they had.",
+        "How to read these",
     )
+
+
+def render_quali_segments(results):
+    """One row per driver in grid order, a dot for each part of qualifying
+    they ran (Q1 a ring, Q2 half-filled, Q3 solid) on a lap-time axis, and
+    the two cut lines between the rows."""
+    classified = results.dropna(subset=["Position"]).sort_values("Position")
+    classified = classified[classified[["Q1", "Q2", "Q3"]].notna().any(axis=1)]
+    drivers = list(classified["Abbreviation"])
+    parts = ("Q1", "Q2", "Q3")
+    times = {q: classified.set_index("Abbreviation")[q].dt.total_seconds() for q in parts}
+
+    # A part's cut time is the slowest time among the drivers who got through it.
+    cuts = {}
+    for q, following in (("Q1", "Q2"), ("Q2", "Q3")):
+        through = times[q][times[following].notna()].dropna()
+        if not through.empty:
+            cuts[q] = through.max()
+
+    fig = base_figure("", "", "Lap time", hovermode="closest")
+    fig.update_layout(height=max(CHART_HEIGHT, 26 * len(drivers) + 90), margin=dict(t=30, b=44, l=8, r=64))
+    fig.update_yaxes(
+        autorange=False, range=[len(drivers) - 0.4, -0.6],
+        tickvals=list(range(len(drivers))), ticktext=drivers, tickfont=dict(size=11),
+    )
+    for row, driver in enumerate(drivers):
+        color = safe_driver_color(driver, session)
+        ran = [(q, times[q][driver]) for q in parts if pd.notna(times[q][driver])]
+        if len(ran) > 1:
+            fig.add_trace(go.Scatter(
+                x=[t for _, t in ran], y=[row] * len(ran), mode="lines", showlegend=False,
+                line=dict(color=hex_to_rgba(color, 0.45), width=2), hoverinfo="skip",
+            ))
+        for q, t in ran:
+            fill = {"Q1": "rgba(0,0,0,0)", "Q2": hex_to_rgba(color, 0.45), "Q3": color}[q]
+            fig.add_trace(go.Scatter(
+                x=[t], y=[row], mode="markers", showlegend=False,
+                marker=dict(size=10, color=fill, line=dict(color=color, width=2)),
+                hovertemplate=f"{driver} · {q} {format_lap_time(pd.Timedelta(seconds=t))}<extra></extra>",
+            ))
+        if ran:
+            last_part, last_time = ran[-1]
+            if last_part in cuts and last_time > cuts[last_part]:
+                # Beside the row's slowest dot, so it never sits on one.
+                fig.add_annotation(
+                    x=max(t for _, t in ran), y=row, text=f"+{last_time - cuts[last_part]:.3f}", showarrow=False,
+                    xanchor="left", xshift=9, font=dict(size=10.5, color=PALETTE["ink_dim"]),
+                )
+    for following, label in (("Q2", "out in Q1"), ("Q3", "out in Q2")):
+        out = [row for row, d in enumerate(drivers) if pd.isna(times[following][d])]
+        if out and out[0] > 0:
+            fig.add_hline(y=out[0] - 0.5, line_color="rgba(255,255,255,0.3)", line_width=1, line_dash="dot")
+            fig.add_annotation(
+                x=1, xref="x domain", y=out[0] - 0.5, text=f"{label} ↓", showarrow=False,
+                xanchor="right", yanchor="top", font=dict(size=10, color=PALETTE["ink_faint"]),
+            )
+    # The legend explains the three dot styles, in neutral ink.
+    for q, fill in (("Q1", "rgba(0,0,0,0)"), ("Q2", "rgba(226,232,240,0.45)"), ("Q3", "#e2e8f0")):
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="markers", name=q,
+            marker=dict(size=10, color=fill, line=dict(color="#e2e8f0", width=2)),
+        ))
+    fig.update_layout(showlegend=True)
+    everything = pd.concat([times[q] for q in parts]).dropna()
+    lo, hi = everything.min(), everything.max()
+    pad = max(0.15, (hi - lo) * 0.06)
+    step = 1.0 if hi - lo > 3 else 0.5
+    ticks = np.arange(np.ceil((lo - pad) / step) * step, hi + pad, step)
+    fig.update_xaxes(
+        range=[lo - pad, hi + pad * 3], tickvals=ticks, tickangle=0,
+        ticktext=[format_lap_time(pd.Timedelta(seconds=float(t)))[:-4 if step == 1.0 else -2] for t in ticks],
+    )
+    plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+
+
+def render_ideal_order(best, ideal):
+    """A slope chart: place on best lap (left) against place on ideal lap
+    (right). A driver who changes place is drawn in full, the rest fade, so
+    the chart says at once who had more in hand than their lap showed."""
+    ideal = ideal.dropna()
+    drivers = [d for d in best.index if d in ideal.index]
+    if len(drivers) < 2:
+        empty_state("Not enough complete laps to build ideal laps", "note")
+        return
+    left = {d: i for i, d in enumerate(drivers)}
+    right = {d: i for i, d in enumerate(ideal[drivers].sort_values().index)}
+    fig = base_figure("", "", "", hovermode="closest")
+    fig.update_layout(height=max(CHART_HEIGHT, 26 * len(drivers) + 90), showlegend=False,
+                      margin=dict(t=30, b=20, l=8, r=8))
+    fig.update_yaxes(autorange=False, range=[len(drivers) - 0.4, -0.6], visible=False)
+    fig.update_xaxes(
+        range=[-0.6, 1.6], tickvals=[0, 1], ticktext=["Best lap", "Ideal lap"], side="top",
+        showgrid=False, zeroline=False, tickfont=dict(size=12, color=PALETTE["ink_dim"]),
+    )
+    for d in drivers:
+        color = safe_driver_color(d, session)
+        moved = left[d] != right[d]
+        unused = max(0.0, best[d] - ideal[d])
+        fig.add_trace(go.Scatter(
+            x=[0, 1], y=[left[d], right[d]], mode="lines+markers",
+            line=dict(color=color if moved else hex_to_rgba(color, 0.28), width=2.4 if moved else 1.4),
+            marker=dict(size=8 if moved else 6, color=color if moved else hex_to_rgba(color, 0.4)),
+            hovertemplate=(
+                f"{d}: P{left[d] + 1} on best lap, P{right[d] + 1} on ideal lap"
+                f"<br>{unused:.3f} s left on the table<extra></extra>"
+            ),
+        ))
+        ink = PALETTE["ink"] if moved else PALETTE["ink_faint"]
+        fig.add_annotation(x=0, y=left[d], text=f"P{left[d] + 1}  {d}", showarrow=False,
+                           xanchor="right", xshift=-10, font=dict(size=11, color=ink))
+        change = left[d] - right[d]
+        tag = f"  ▲{change}" if change > 0 else (f"  ▼{-change}" if change < 0 else "")
+        fig.add_annotation(x=1, y=right[d], text=f"{d}  P{right[d] + 1}{tag}", showarrow=False,
+                           xanchor="left", xshift=10, font=dict(size=11, color=ink))
+    plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
 
 def dhl_team_color(team):
@@ -6080,6 +6241,181 @@ if section == SECTION_SEASON and showing(tab_pits):
                     plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
             st.markdown(DHL_SOURCE, unsafe_allow_html=True)
 
+# Fixed colours for the teams that defined an era. Keyed on Ergast's
+# constructor names, which FastF1's colour lookup doesn't know for past
+# teams (Team Lotus, Brabham) -- it would paint them all grey. Williams is
+# drawn white, after its long white-and-blue years, because its blue sat too
+# close to Red Bull's. Anything outside this list goes into "Other".
+ERA_COLORS = {
+    "Ferrari": "#e8002d",
+    "McLaren": "#ff8000",
+    "Mercedes": "#27f4d2",
+    "Red Bull": "#3671c6",
+    "Williams": "#e6ebf2",
+    "Lotus": "#e0b83b",
+    "Brabham": "#9b6bff",
+}
+ERA_OTHER = "#4a5163"
+
+# Ergast files one team under several names, one per engine deal --
+# "Lotus-Climax", "Lotus-Ford", "Team Lotus" -- which split Lotus's 79 wins
+# three ways and sent the sixties into "Other". Folded back into one team
+# here. Lotus F1 (2012-15) was a different team, Renault renamed, and stays
+# apart.
+CONSTRUCTOR_GROUPS = {
+    "Team Lotus": "Lotus", "Lotus-Climax": "Lotus", "Lotus-Ford": "Lotus", "Lotus-BRM": "Lotus",
+    "Brabham-Repco": "Brabham", "Brabham-Climax": "Brabham", "Brabham-Ford": "Brabham",
+    "Cooper-Climax": "Cooper", "Cooper-Maserati": "Cooper",
+    "McLaren-Ford": "McLaren",
+}
+
+
+def render_eras(chronological, wins_by_team, races_per_season):
+    """Every season since 1950 as one column, split by who won its races:
+    the eras -- Ferrari at the turn of the century, McLaren in the late
+    eighties, Mercedes, Red Bull -- show as blocks of one colour. Shares,
+    not counts, since a season has had anywhere from 7 to 24 races."""
+    teams = [t for t in wins_by_team.index if t in ERA_COLORS]
+    by_season = chronological.groupby(["season", "constructorName"]).size().unstack(fill_value=0)
+    seasons = by_season.index.astype(int)
+    fig = base_figure("", "Share of the season's races won", "", hovermode="closest")
+    fig.update_layout(
+        barmode="stack", bargap=0.12, height=400,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, traceorder="normal"),
+    )
+    other = by_season.drop(columns=[t for t in teams if t in by_season.columns]).sum(axis=1)
+    series = [(t, by_season[t] if t in by_season else 0 * other, ERA_COLORS[t]) for t in teams]
+    series.append(("Other", other, ERA_OTHER))
+    for name, counts, color in series:
+        share = 100 * counts / races_per_season.reindex(by_season.index)
+        # Zeros, not blanks, for a season a team won nothing: plotly stacks a
+        # blank by starting the next bar from the axis, so the columns
+        # overlapped and stopped short of 100%.
+        fig.add_trace(go.Bar(
+            x=seasons, y=share, name=name,
+            marker=dict(color=color, line=dict(width=0)),
+            customdata=np.stack([counts.to_numpy(), races_per_season.reindex(by_season.index).to_numpy()], axis=1),
+            hovertemplate=f"%{{x}} · {name}: %{{customdata[0]}} of %{{customdata[1]}} races (%{{y:.0f}}%)<extra></extra>",
+        ))
+    fig.update_yaxes(range=[0, 100], ticksuffix="%", dtick=25)
+    fig.update_xaxes(dtick=10, showgrid=False)
+    with chart_panel(
+        "The eras",
+        "Every season since 1950, split by the team that won its races",
+        accent=PALETTE["red"],
+    ):
+        plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+
+
+RECORD_RACE_COLORS = [
+    PALETTE["teal"], PALETTE["red"], PALETTE["blue"], PALETTE["amber"],
+    PALETTE["violet"], PALETTE["pink"], "#e6ebf2", "#8fd3ff",
+]
+
+
+def render_record_race(chronological, wins_by_driver, top=8):
+    """Career wins piling up over time for the most successful drivers: a
+    ranking says who has the most, this shows how and when they got there
+    -- and the moment one line overtakes another."""
+    leaders = list(wins_by_driver.head(top).index)
+    first_win = chronological[chronological["Driver"].isin(leaders)]["raceDate"].min()
+    start = pd.to_datetime(first_win) - pd.DateOffset(years=2)
+    end = pd.Timestamp.today().normalize()
+    fig = base_figure("", "Career wins", "", hovermode="closest")
+    height = 480
+    fig.update_layout(height=height, showlegend=False, margin=dict(t=16, b=40, l=8, r=150))
+    finals = {d: int(wins_by_driver[d]) for d in leaders}
+    top_value = max(finals.values()) * 1.06
+    offsets = dict(zip(leaders, spread_labels(
+        [finals[d] for d in leaders], plot_height_px=height - 16 - 40, value_span=top_value,
+    )))
+    for index, driver in enumerate(leaders):
+        color = RECORD_RACE_COLORS[index % len(RECORD_RACE_COLORS)]
+        own = chronological[chronological["Driver"] == driver].sort_values(["season", "round"])
+        dates = pd.to_datetime(own["raceDate"]).tolist()
+        counts = list(range(1, len(own) + 1))
+        # The line runs flat to today (or to the last win of a finished
+        # career), so the labels line up at the right edge like a table.
+        fig.add_trace(go.Scatter(
+            x=dates + [end], y=counts + [counts[-1]], mode="lines", line=dict(color=color, width=2.2, shape="hv"),
+            text=[f"{r} {int(s)}" for r, s in zip(own["raceName"], own["season"])] + ["today"],
+            hovertemplate=f"{driver}: win %{{y}} · %{{text}}<extra></extra>",
+        ))
+        fig.add_annotation(
+            x=end, y=finals[driver], text=f"<b>{own['familyName'].iloc[0]}</b>  {finals[driver]}",
+            showarrow=False, xanchor="left", xshift=8, yshift=-offsets[driver],
+            font=dict(size=11.5, color=PALETTE["ink"]),
+        )
+    fig.update_yaxes(range=[0, top_value])
+    fig.update_xaxes(range=[start, end], showgrid=False)
+    with chart_panel(
+        "The race to the record",
+        f"Career wins over time for the {top} most successful drivers",
+        accent=PALETTE["amber"],
+    ):
+        plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
+
+
+def render_all_time_tables(chronological, poles, wins_by_driver, poles_by_driver, wins_by_team, streaks):
+    """The all-time lists as two tables, one row per driver or team with
+    every count side by side -- wins, poles, how often a pole became a win,
+    the best season, the longest run -- where they used to be seven
+    separate bar charts, each ranking the same names on one number."""
+    wins_from_pole = chronological[chronological["grid"] == 1]["Driver"].value_counts()
+    season_wins = chronological.groupby(["Driver", "season"]).size()
+    longest_by_driver = streaks.groupby("Driver")["races"].max()
+
+    driver_rows = []
+    for rank, (driver, wins_count) in enumerate(wins_by_driver.head(20).items(), start=1):
+        pole_count = int(poles_by_driver.get(driver, 0))
+        converted = int(wins_from_pole.get(driver, 0))
+        seasons = season_wins[driver]
+        driver_rows.append({
+            "pos": str(rank), "driver": driver,
+            "wins": str(int(wins_count)), "poles": str(pole_count),
+            "conv": f"{100 * converted / pole_count:.0f}%" if pole_count else "—",
+            "season": f"{int(seasons.max())} · {int(seasons.idxmax())}",
+            "streak": str(int(longest_by_driver.get(driver, 1))),
+        })
+
+    team_poles = poles["constructorName"].value_counts()
+    team_seasons = chronological.groupby(["constructorName", "season"]).size()
+    team_rows = []
+    for rank, (team, wins_count) in enumerate(wins_by_team.head(15).items(), start=1):
+        seasons = team_seasons[team]
+        team_rows.append({
+            "pos": str(rank), "team": team, "color": ERA_COLORS.get(team, "transparent"),
+            "wins": str(int(wins_count)), "poles": str(int(team_poles.get(team, 0))),
+            "span": f"{int(seasons.index.min())}–{int(seasons.index.max())}"
+            if seasons.index.min() != seasons.index.max() else f"{int(seasons.index.min())}",
+            "season": f"{int(seasons.max())} · {int(seasons.idxmax())}",
+        })
+
+    # One above the other, not side by side: at half width the names wrapped
+    # onto two lines and the last columns ran out of the panel.
+    with st.container():
+        with chart_panel("Drivers", "The 20 with the most wins", accent=PALETTE["blue"]):
+            render_table(driver_rows, [
+                ("pos", "Pos", "pos"), ("driver", "Driver", "name"), ("wins", "Wins", "num"),
+                ("poles", "Poles", "num"), ("conv", "Pole → win", "num"),
+                ("season", "Best season", "mono"), ("streak", "Streak", "num"),
+            ])
+        st.write("")
+        with chart_panel("Constructors", "The 15 with the most wins", accent=PALETTE["teal"]):
+            render_table(team_rows, [
+                ("pos", "Pos", "pos"), ("team", "Team", "name"), ("wins", "Wins", "num"),
+                ("poles", "Poles", "num"), ("span", "Winning years", "mono"),
+                ("season", "Best season", "mono"),
+            ])
+    method_note(
+        "**Pole → win** is the share of a driver's poles they turned into a win. **Best season** is "
+        "the most wins in one year and the year it came. **Streak** is the most races won in a row, "
+        "counted across season boundaries -- a streak doesn't reset in January. **Winning years** "
+        "runs from a team's first win to its latest.",
+        "What the columns mean",
+    )
+
+
 # ------------------------------------------------------------ all-time --
 
 if section == SECTION_ALL_TIME:
@@ -6099,6 +6435,8 @@ if section == SECTION_ALL_TIME:
             st.error(f"Couldn't load the historical results: {exc}")
         else:
             wins["Driver"] = wins.apply(full_name, axis=1)
+            wins["constructorName"] = wins["constructorName"].replace(CONSTRUCTOR_GROUPS)
+            poles["constructorName"] = poles["constructorName"].replace(CONSTRUCTOR_GROUPS)
             poles["Driver"] = poles.apply(full_name, axis=1)
             wins_by_driver = wins["Driver"].value_counts()
             poles_by_driver = poles["Driver"].value_counts()
@@ -6139,14 +6477,46 @@ if section == SECTION_ALL_TIME:
                  PALETTE["pink"]),
             ])
             st.write("")
-            # per_row=3 so this single card keeps the width of one card in the
-            # rows above it, instead of stretching across the whole page.
-            stat_cards([(
-                "Wins started from pole",
-                f"{100 * pole_wins / len(chronological):.0f}<small>%</small>",
-                f"{pole_wins} of {len(chronological)} races — pole is worth well under a coin flip",
-                PALETTE["red"],
-            )], per_row=3)
+            # Seasons, streaks and pole conversion come out of the same two
+            # downloads as everything above.
+            races_per_season = chronological.groupby("season").size()
+            season_wins = chronological.groupby(["season", "Driver"]).size()
+            (best_season, best_season_driver), best_season_count = season_wins.idxmax(), int(season_wins.max())
+            # A new streak starts wherever the winner differs from the previous
+            # race's, so a running count of those changes labels each streak.
+            # The grouping key has to be renamed: it inherits the name "Driver"
+            # from the column it's derived from, which collides with grouping by
+            # the column itself.
+            streak_id = (chronological["Driver"] != chronological["Driver"].shift()).cumsum().rename("streak")
+            streaks = (
+                chronological.groupby([streak_id, chronological["Driver"]])
+                .size().rename("races").reset_index()
+            )
+            longest = streaks.loc[streaks["races"].idxmax()]
+            longest_seasons = chronological.loc[streak_id == longest["streak"], "season"]
+            longest_span = (
+                f"{int(longest_seasons.min())}" if longest_seasons.min() == longest_seasons.max()
+                else f"{int(longest_seasons.min())}–{int(longest_seasons.max())}"
+            )
+            stat_cards([
+                (
+                    "Wins started from pole",
+                    f"{100 * pole_wins / len(chronological):.0f}<small>%</small>",
+                    f"{pole_wins} of {len(chronological)} races — well under a coin flip",
+                    PALETTE["red"],
+                ),
+                (
+                    "Most wins in a season", f"{best_season_count}",
+                    f"<b>{best_season_driver}</b> · {int(best_season)}, "
+                    f"{100 * best_season_count / races_per_season[best_season]:.0f}% of the races",
+                    PALETTE["amber"],
+                ),
+                (
+                    "Longest winning streak", f"{int(longest['races'])} <small>races</small>",
+                    f"<b>{longest['Driver']}</b> · {longest_span}",
+                    PALETTE["pink"],
+                ),
+            ])
 
             # Career points totals are deliberately absent: F1 has rescored
             # itself repeatedly (8 points for a win until 1960, 9, then 10, then
@@ -6163,221 +6533,8 @@ if section == SECTION_ALL_TIME:
             )
 
             st.write("")
-
-            with chart_panel("Most race wins", "All-time top 15", accent=PALETTE["blue"]):
-                top_wins = wins_by_driver.head(15).sort_values()
-                fig_wins = base_figure("", "", "Wins")
-                fig_wins.update_layout(showlegend=False)
-                fig_wins.add_trace(
-                    go.Bar(
-                        x=top_wins.to_numpy(), y=top_wins.index, orientation="h",
-                        marker=dict(
-                            color=top_wins.to_numpy(), colorscale=bar_scale(PALETTE["blue"]),
-                            line=dict(color="rgba(255,255,255,0.12)", width=1),
-                        ),
-                        text=top_wins.to_numpy(), textposition="outside", cliponaxis=False,
-                        hovertemplate="%{y}: %{x} wins<extra></extra>",
-                    )
-                )
-                size_horizontal_bars(fig_wins, top_wins.to_numpy())
-                style_bars(fig_wins)
-                plotly_chart(fig_wins, width="stretch", config=PLOTLY_CONFIG)
-
+            render_eras(chronological, wins_by_team, races_per_season)
             st.write("")
-
-            with chart_panel("Most pole positions", "All-time top 15", accent=PALETTE["violet"]):
-                top_poles = poles_by_driver.head(15).sort_values()
-                fig_poles_all = base_figure("", "", "Poles")
-                fig_poles_all.update_layout(showlegend=False)
-                fig_poles_all.add_trace(
-                    go.Bar(
-                        x=top_poles.to_numpy(), y=top_poles.index, orientation="h",
-                        marker=dict(
-                            color=top_poles.to_numpy(), colorscale=bar_scale(PALETTE["violet"]),
-                            line=dict(color="rgba(255,255,255,0.12)", width=1),
-                        ),
-                        text=top_poles.to_numpy(), textposition="outside", cliponaxis=False,
-                        hovertemplate="%{y}: %{x} poles<extra></extra>",
-                    )
-                )
-                size_horizontal_bars(fig_poles_all, top_poles.to_numpy())
-                style_bars(fig_poles_all)
-                plotly_chart(fig_poles_all, width="stretch", config=PLOTLY_CONFIG)
-
+            render_record_race(chronological, wins_by_driver)
             st.write("")
-
-            # New here: what a pole was actually worth to each of them. The two
-            # charts above rank wins and poles separately, so the reader can
-            # see that a driver has many of both without ever learning how
-            # often the one turned into the other -- which is the interesting
-            # part, and the per-driver version of the "wins started from pole"
-            # card at the top of the page.
-            wins_from_pole = chronological[chronological["grid"] == 1]["Driver"].value_counts()
-            conversion = [
-                (driver, int(poles), int(wins_from_pole.get(driver, 0)))
-                for driver, poles in poles_by_driver.head(12).items()
-            ]
-            conversion.sort(key=lambda row: row[2] / row[1] if row[1] else 0)
-            if conversion:
-                with chart_panel(
-                    "Pole-to-win conversion",
-                    "Of the 12 biggest pole sitters · filled part is poles converted into wins",
-                    accent=PALETTE["violet"],
-                ):
-                    fig_conv = base_figure("", "", "Poles", hovermode="closest")
-                    fig_conv.update_layout(showlegend=False, barmode="overlay")
-                    names_conv = [row[0] for row in conversion]
-                    poles_conv = [row[1] for row in conversion]
-                    won_conv = [row[2] for row in conversion]
-                    rates = [100 * w / p if p else 0 for p, w in zip(poles_conv, won_conv)]
-                    # The pale bar is the poles, the solid one the wins from
-                    # them, drawn over it -- so the gap between the two *is*
-                    # the poles that got away, with no second axis or
-                    # percentage chart needed to see it.
-                    fig_conv.add_trace(
-                        go.Bar(
-                            x=poles_conv, y=names_conv, orientation="h",
-                            marker=dict(color="rgba(255,255,255,0.07)",
-                                        line=dict(color="rgba(255,255,255,0.12)", width=1)),
-                            text=[f"{r:.0f}%" for r in rates],
-                            textposition="outside", cliponaxis=False,
-                            hoverinfo="skip",
-                        )
-                    )
-                    fig_conv.add_trace(
-                        go.Bar(
-                            x=won_conv, y=names_conv, orientation="h",
-                            marker=dict(color=PALETTE["violet"]),
-                            customdata=[[p, r] for p, r in zip(poles_conv, rates)],
-                            hovertemplate=(
-                                "%{y}: %{x} wins from %{customdata[0]} poles"
-                                " (%{customdata[1]:.0f}%)<extra></extra>"
-                            ),
-                        )
-                    )
-                    size_horizontal_bars(fig_conv, poles_conv, pad_frac=0.22)
-                    style_bars(fig_conv)
-                    plotly_chart(fig_conv, width="stretch", config=PLOTLY_CONFIG)
-
-            st.write("")
-
-            with chart_panel("Most wins by constructor", "All-time top 15", accent=PALETTE["teal"]):
-                top_team_wins = wins_by_team.head(15).sort_values()
-                fig_team_wins = base_figure("", "", "Wins")
-                fig_team_wins.update_layout(showlegend=False)
-                fig_team_wins.add_trace(
-                    go.Bar(
-                        x=top_team_wins.to_numpy(), y=top_team_wins.index, orientation="h",
-                        marker=dict(
-                            color=top_team_wins.to_numpy(), colorscale=bar_scale(PALETTE["teal"]),
-                            line=dict(color="rgba(255,255,255,0.12)", width=1),
-                        ),
-                        text=top_team_wins.to_numpy(), textposition="outside", cliponaxis=False,
-                        hovertemplate="%{y}: %{x} wins<extra></extra>",
-                    )
-                )
-                size_horizontal_bars(fig_team_wins, top_team_wins.to_numpy())
-                style_bars(fig_team_wins)
-                plotly_chart(fig_team_wins, width="stretch", config=PLOTLY_CONFIG)
-
-            st.write("")
-            races_per_season = chronological.groupby("season").size()
-            season_wins = chronological.groupby(["season", "Driver"]).size().sort_values(ascending=False)
-            top_season_wins = season_wins.head(12).sort_values()
-            season_labels = [f"{driver} · {int(season)}" for season, driver in top_season_wins.index]
-            season_shares = [
-                100 * count / races_per_season[season]
-                for (season, _), count in top_season_wins.items()
-            ]
-            fig_season_wins = base_figure("", "", "Wins")
-            fig_season_wins.update_layout(showlegend=False)
-            fig_season_wins.add_trace(
-                go.Bar(
-                    x=top_season_wins.to_numpy(), y=season_labels, orientation="h",
-                    marker=dict(
-                        color=top_season_wins.to_numpy(), colorscale=bar_scale(PALETTE["amber"]),
-                        line=dict(color="rgba(255,255,255,0.12)", width=1),
-                    ),
-                    text=[
-                        f"{count}  ·  {share:.0f}%"
-                        for count, share in zip(top_season_wins.to_numpy(), season_shares)
-                    ],
-                    textposition="outside", cliponaxis=False,
-                    customdata=[
-                        [races_per_season[season], share]
-                        for (season, _), share in zip(top_season_wins.index, season_shares)
-                    ],
-                    hovertemplate="%{y}: %{x} of %{customdata[0]} races (%{customdata[1]:.0f}%)<extra></extra>",
-                )
-            )
-            # Wider headroom than the default: this chart's bar labels carry the
-            # share as well as the count, so they need more room to the right.
-            size_horizontal_bars(fig_season_wins, top_season_wins.to_numpy(), pad_frac=0.3)
-            style_bars(fig_season_wins)
-            with chart_panel(
-                "Most wins in a single season",
-                "Top 12 · with the share of that season's races, since the calendar has grown from 7 to 24",
-                accent=PALETTE["amber"],
-            ):
-                plotly_chart(fig_season_wins, width="stretch", config=PLOTLY_CONFIG)
-
-            st.write("")
-            # A new streak starts wherever the winner differs from the previous
-            # race's, so a running count of those changes labels each streak.
-            # The grouping key has to be renamed: it inherits the name "Driver"
-            # from the column it's derived from, which collides with grouping by
-            # the column itself.
-            streak_id = (chronological["Driver"] != chronological["Driver"].shift()).cumsum().rename("streak")
-            streaks = (
-                chronological.groupby([streak_id, chronological["Driver"]])
-                .size().rename("races").reset_index()
-                .sort_values("races", ascending=False)
-            )
-            top_streaks = streaks.head(10).iloc[::-1]
-            streak_labels = []
-            for _, streak in top_streaks.iterrows():
-                seasons = chronological.loc[streak_id == streak["streak"], "season"]
-                span = f"{int(seasons.min())}" if seasons.min() == seasons.max() else f"{int(seasons.min())}–{int(seasons.max())}"
-                streak_labels.append(f"{streak['Driver']} · {span}")
-            fig_streaks = base_figure("", "", "Races in a row")
-            fig_streaks.update_layout(showlegend=False)
-            fig_streaks.add_trace(
-                go.Bar(
-                    x=top_streaks["races"].to_numpy(), y=streak_labels, orientation="h",
-                    marker=dict(
-                        color=top_streaks["races"].to_numpy(), colorscale=bar_scale(PALETTE["pink"]),
-                        line=dict(color="rgba(255,255,255,0.12)", width=1),
-                    ),
-                    text=top_streaks["races"].to_numpy(), textposition="outside", cliponaxis=False,
-                    hovertemplate="%{y}: %{x} in a row<extra></extra>",
-                )
-            )
-            size_horizontal_bars(fig_streaks, top_streaks["races"].to_numpy())
-            style_bars(fig_streaks)
-            with chart_panel(
-                "Longest winning streaks",
-                "Consecutive races won, counted across season boundaries — a streak doesn't reset in January",
-                accent=PALETTE["pink"],
-            ):
-                plotly_chart(fig_streaks, width="stretch", config=PLOTLY_CONFIG)
-
-            st.write("")
-
-            with chart_panel("Most poles by constructor", "All-time top 12", accent=PALETTE["violet"]):
-                poles_by_team = poles["constructorName"].value_counts().head(12).sort_values()
-                fig_team_poles = base_figure("", "", "Poles")
-                fig_team_poles.update_layout(showlegend=False)
-                fig_team_poles.add_trace(
-                    go.Bar(
-                        x=poles_by_team.to_numpy(), y=poles_by_team.index, orientation="h",
-                        marker=dict(
-                            color=poles_by_team.to_numpy(), colorscale=bar_scale(PALETTE["violet"]),
-                            line=dict(color="rgba(255,255,255,0.12)", width=1),
-                        ),
-                        text=poles_by_team.to_numpy(), textposition="outside", cliponaxis=False,
-                        hovertemplate="%{y}: %{x} poles<extra></extra>",
-                    )
-                )
-                size_horizontal_bars(fig_team_poles, poles_by_team.to_numpy())
-                style_bars(fig_team_poles)
-                plotly_chart(fig_team_poles, width="stretch", config=PLOTLY_CONFIG)
+            render_all_time_tables(chronological, poles, wins_by_driver, poles_by_driver, wins_by_team, streaks)
