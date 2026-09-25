@@ -3812,13 +3812,12 @@ def sector_tile(gap, widest):
 
 
 def render_quali_stats():
-    """Qualifying read three ways: where on the lap each driver was quick
-    (the sector map), how the session played out part by part
-    (Q1 -> Q2 -> Q3), and who left time on the table (best lap against
-    ideal lap). These replaced two bar charts -- gap to pole and time left
-    on the table -- that ranked the same drivers in the same order, which
-    Peter found flat. Deleted laps (track limits) are left out: a lap that
-    didn't count for the grid shouldn't count here either."""
+    """The sector map, then gap to pole and ideal lap, the two numbers a
+    qualifying session is read by. A Q1 -> Q2 -> Q3 dot chart and an
+    ideal-lap slope chart were tried in place of the two bar charts on
+    2026-09-25 and removed the same day -- Peter preferred the bars and kept
+    only the sector map. Deleted laps (track limits) are left out of all
+    three: a lap that didn't count for the grid shouldn't count here either."""
     laps = session.laps
     if "Deleted" in laps.columns:
         laps = laps[laps["Deleted"] != True]  # noqa: E712 -- the column holds NaN too
@@ -3827,6 +3826,9 @@ def render_quali_stats():
         empty_state("No timed laps in this session")
         return
     best = timed.groupby("Driver")["LapTime"].min().dt.total_seconds().sort_values()
+    order = list(reversed(best.index))  # fastest at the top of a horizontal bar chart
+    colors = [safe_driver_color(d, session) for d in order]
+
     sector_cols = ["Sector1Time", "Sector2Time", "Sector3Time"]
     sectors = timed.groupby("Driver")[sector_cols].min().apply(lambda c: c.dt.total_seconds())
     sectors = sectors.reindex(best.index)
@@ -3861,158 +3863,57 @@ def render_quali_stats():
         ])
 
     st.write("")
-    col_segments, col_ideal = st.columns(2)
-
-    with col_segments:
-        results = session.results if session.results is not None else pd.DataFrame()
-        has_segments = (
-            not results.empty and {"Q1", "Q2", "Q3"} <= set(results.columns)
-            and results[["Q1", "Q2", "Q3"]].notna().any().any()
-        )
-        with chart_panel(
-            "Q1 → Q2 → Q3",
-            "Each driver's best time in every part they ran · the knocked-out carry their miss",
-            accent=PALETTE["red"],
-        ):
-            if has_segments:
-                render_quali_segments(results)
-            else:
-                empty_state("No Q1/Q2/Q3 split for this session", "note")
+    col_gap, col_ideal = st.columns(2)
+    with col_gap:
+        with chart_panel("Gap to pole", "Each driver's best lap, behind the fastest", accent=PALETTE["red"]):
+            gap = (best - best.iloc[0])[order]
+            fig_gap = base_figure("", "", "Seconds behind")
+            fig_gap.update_layout(showlegend=False)
+            fig_gap.update_yaxes(tickfont=dict(size=11))
+            fig_gap.add_trace(
+                go.Bar(
+                    x=gap.to_numpy(), y=order, orientation="h",
+                    marker=dict(color=colors, line=dict(color="rgba(255,255,255,0.10)", width=1)),
+                    text=["POLE" if g == 0 else f"+{g:.3f}" for g in gap], textposition="outside", cliponaxis=False,
+                    hovertemplate="%{y}: +%{x:.3f} s<extra></extra>",
+                )
+            )
+            size_horizontal_bars(fig_gap, gap.to_numpy(), row_px=26, bar_px=16)
+            style_bars(fig_gap)
+            plotly_chart(fig_gap, width="stretch", config=PLOTLY_CONFIG)
 
     with col_ideal:
         with chart_panel(
-            "The ideal-lap order",
-            "Ranked on best lap, then on the sum of each driver's best sectors",
+            "Time left on the table", "Best lap minus the sum of the driver's best sectors",
             accent=PALETTE["amber"],
         ):
-            render_ideal_order(best, ideal)
-
-    method_note(
-        "**Sector map**: each driver's best time in each of the three sectors, wherever in the "
-        "session it was set, shown as the gap to the session's best in that sector -- the stronger "
-        "the blue, the closer. **Time left** is the best lap minus the ideal lap, the sum of those "
-        "three best sectors; a driver who strung them together on one lap scores zero. "
-        "**Q1 → Q2 → Q3** uses the official times for each part; the dotted lines are the cuts, "
-        "and a knocked-out driver carries the margin they missed the cut by. **The ideal-lap "
-        "order** re-ranks the field on ideal laps: a line that climbs is a driver whose best lap "
-        "undersold what they had.",
-        "How to read these",
-    )
-
-
-def render_quali_segments(results):
-    """One row per driver in grid order, a dot for each part of qualifying
-    they ran (Q1 a ring, Q2 half-filled, Q3 solid) on a lap-time axis, and
-    the two cut lines between the rows."""
-    classified = results.dropna(subset=["Position"]).sort_values("Position")
-    classified = classified[classified[["Q1", "Q2", "Q3"]].notna().any(axis=1)]
-    drivers = list(classified["Abbreviation"])
-    parts = ("Q1", "Q2", "Q3")
-    times = {q: classified.set_index("Abbreviation")[q].dt.total_seconds() for q in parts}
-
-    # A part's cut time is the slowest time among the drivers who got through it.
-    cuts = {}
-    for q, following in (("Q1", "Q2"), ("Q2", "Q3")):
-        through = times[q][times[following].notna()].dropna()
-        if not through.empty:
-            cuts[q] = through.max()
-
-    fig = base_figure("", "", "Lap time", hovermode="closest")
-    fig.update_layout(height=max(CHART_HEIGHT, 26 * len(drivers) + 90), margin=dict(t=30, b=44, l=8, r=64))
-    fig.update_yaxes(
-        autorange=False, range=[len(drivers) - 0.4, -0.6],
-        tickvals=list(range(len(drivers))), ticktext=drivers, tickfont=dict(size=11),
-    )
-    for row, driver in enumerate(drivers):
-        color = safe_driver_color(driver, session)
-        ran = [(q, times[q][driver]) for q in parts if pd.notna(times[q][driver])]
-        if len(ran) > 1:
-            fig.add_trace(go.Scatter(
-                x=[t for _, t in ran], y=[row] * len(ran), mode="lines", showlegend=False,
-                line=dict(color=hex_to_rgba(color, 0.45), width=2), hoverinfo="skip",
-            ))
-        for q, t in ran:
-            fill = {"Q1": "rgba(0,0,0,0)", "Q2": hex_to_rgba(color, 0.45), "Q3": color}[q]
-            fig.add_trace(go.Scatter(
-                x=[t], y=[row], mode="markers", showlegend=False,
-                marker=dict(size=10, color=fill, line=dict(color=color, width=2)),
-                hovertemplate=f"{driver} · {q} {format_lap_time(pd.Timedelta(seconds=t))}<extra></extra>",
-            ))
-        if ran:
-            last_part, last_time = ran[-1]
-            if last_part in cuts and last_time > cuts[last_part]:
-                # Beside the row's slowest dot, so it never sits on one.
-                fig.add_annotation(
-                    x=max(t for _, t in ran), y=row, text=f"+{last_time - cuts[last_part]:.3f}", showarrow=False,
-                    xanchor="left", xshift=9, font=dict(size=10.5, color=PALETTE["ink_dim"]),
+            sectors = timed.groupby("Driver")[["Sector1Time", "Sector2Time", "Sector3Time"]].min()
+            ideal = sectors.sum(axis=1, min_count=3).dt.total_seconds()
+            lost = (best - ideal).dropna().clip(lower=0)
+            lost = lost.reindex([d for d in order if d in lost.index])
+            fig_ideal = base_figure("", "", "Seconds")
+            fig_ideal.update_layout(showlegend=False)
+            fig_ideal.update_yaxes(tickfont=dict(size=11))
+            fig_ideal.add_trace(
+                go.Bar(
+                    x=lost.to_numpy(), y=list(lost.index), orientation="h",
+                    marker=dict(
+                        color=[safe_driver_color(d, session) for d in lost.index],
+                        line=dict(color="rgba(255,255,255,0.10)", width=1),
+                    ),
+                    text=[f"{v:.3f}" for v in lost], textposition="outside", cliponaxis=False,
+                    hovertemplate="%{y}: %{x:.3f} s off their ideal lap<extra></extra>",
                 )
-    for following, label in (("Q2", "out in Q1"), ("Q3", "out in Q2")):
-        out = [row for row, d in enumerate(drivers) if pd.isna(times[following][d])]
-        if out and out[0] > 0:
-            fig.add_hline(y=out[0] - 0.5, line_color="rgba(255,255,255,0.3)", line_width=1, line_dash="dot")
-            fig.add_annotation(
-                x=1, xref="x domain", y=out[0] - 0.5, text=f"{label} ↓", showarrow=False,
-                xanchor="right", yanchor="top", font=dict(size=10, color=PALETTE["ink_faint"]),
             )
-    # The legend explains the three dot styles, in neutral ink.
-    for q, fill in (("Q1", "rgba(0,0,0,0)"), ("Q2", "rgba(226,232,240,0.45)"), ("Q3", "#e2e8f0")):
-        fig.add_trace(go.Scatter(
-            x=[None], y=[None], mode="markers", name=q,
-            marker=dict(size=10, color=fill, line=dict(color="#e2e8f0", width=2)),
-        ))
-    fig.update_layout(showlegend=True)
-    everything = pd.concat([times[q] for q in parts]).dropna()
-    lo, hi = everything.min(), everything.max()
-    pad = max(0.15, (hi - lo) * 0.06)
-    step = 1.0 if hi - lo > 3 else 0.5
-    ticks = np.arange(np.ceil((lo - pad) / step) * step, hi + pad, step)
-    fig.update_xaxes(
-        range=[lo - pad, hi + pad * 3], tickvals=ticks, tickangle=0,
-        ticktext=[format_lap_time(pd.Timedelta(seconds=float(t)))[:-4 if step == 1.0 else -2] for t in ticks],
+            size_horizontal_bars(fig_ideal, lost.to_numpy(), row_px=26, bar_px=16)
+            style_bars(fig_ideal)
+            plotly_chart(fig_ideal, width="stretch", config=PLOTLY_CONFIG)
+    method_note(
+        "**Ideal lap** is the sum of a driver's three best sector times, wherever in the "
+        "session each was set. The bar is how much slower their best actual lap was than that "
+        "-- a driver who strung their best sectors together on one lap scores zero. Drivers "
+        "stay in order of their best lap, as in the gap chart beside it, so the two read row by row."
     )
-    plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
-
-
-def render_ideal_order(best, ideal):
-    """A slope chart: place on best lap (left) against place on ideal lap
-    (right). A driver who changes place is drawn in full, the rest fade, so
-    the chart says at once who had more in hand than their lap showed."""
-    ideal = ideal.dropna()
-    drivers = [d for d in best.index if d in ideal.index]
-    if len(drivers) < 2:
-        empty_state("Not enough complete laps to build ideal laps", "note")
-        return
-    left = {d: i for i, d in enumerate(drivers)}
-    right = {d: i for i, d in enumerate(ideal[drivers].sort_values().index)}
-    fig = base_figure("", "", "", hovermode="closest")
-    fig.update_layout(height=max(CHART_HEIGHT, 26 * len(drivers) + 90), showlegend=False,
-                      margin=dict(t=30, b=20, l=8, r=8))
-    fig.update_yaxes(autorange=False, range=[len(drivers) - 0.4, -0.6], visible=False)
-    fig.update_xaxes(
-        range=[-0.6, 1.6], tickvals=[0, 1], ticktext=["Best lap", "Ideal lap"], side="top",
-        showgrid=False, zeroline=False, tickfont=dict(size=12, color=PALETTE["ink_dim"]),
-    )
-    for d in drivers:
-        color = safe_driver_color(d, session)
-        moved = left[d] != right[d]
-        unused = max(0.0, best[d] - ideal[d])
-        fig.add_trace(go.Scatter(
-            x=[0, 1], y=[left[d], right[d]], mode="lines+markers",
-            line=dict(color=color if moved else hex_to_rgba(color, 0.28), width=2.4 if moved else 1.4),
-            marker=dict(size=8 if moved else 6, color=color if moved else hex_to_rgba(color, 0.4)),
-            hovertemplate=(
-                f"{d}: P{left[d] + 1} on best lap, P{right[d] + 1} on ideal lap"
-                f"<br>{unused:.3f} s left on the table<extra></extra>"
-            ),
-        ))
-        ink = PALETTE["ink"] if moved else PALETTE["ink_faint"]
-        fig.add_annotation(x=0, y=left[d], text=f"P{left[d] + 1}  {d}", showarrow=False,
-                           xanchor="right", xshift=-10, font=dict(size=11, color=ink))
-        change = left[d] - right[d]
-        tag = f"  ▲{change}" if change > 0 else (f"  ▼{-change}" if change < 0 else "")
-        fig.add_annotation(x=1, y=right[d], text=f"{d}  P{right[d] + 1}{tag}", showarrow=False,
-                           xanchor="left", xshift=10, font=dict(size=11, color=ink))
-    plotly_chart(fig, width="stretch", config=PLOTLY_CONFIG)
 
 
 def dhl_team_color(team):
