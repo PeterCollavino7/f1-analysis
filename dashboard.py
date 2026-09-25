@@ -2768,6 +2768,8 @@ def url_tabs(labels, key):
     counterpart = {"Pace": "Stats", "Stats": "Pace"}
     open_now = st.session_state.get(key)
     wanted = st.query_params.get("tab")
+    # Links shared before two tabs were renamed (2026-09-25) keep working.
+    wanted = {"head-to-head": "telemetry", "race-by-race": "stats"}.get(wanted, wanted)
     from_url = next((label for label in labels if tab_slug(label) == wanted), None)
     default = next(
         (label for label in (open_now, counterpart.get(open_now), from_url) if label in labels), None,
@@ -2780,7 +2782,7 @@ def url_tabs(labels, key):
         st.query_params.pop("tab", None)
     else:
         st.query_params["tab"] = tab_slug(current)
-    if tab_slug(current) not in ("pace", "head-to-head"):
+    if tab_slug(current) not in ("pace", "telemetry"):
         st.query_params.pop("drivers", None)
     return tabs
 
@@ -2910,15 +2912,17 @@ if section == SECTION_WEEKEND:
     # (Results: classification, positions, overtakes), how it was run
     # (Strategy: tyres and pit stops -- races and sprints only), who was quick
     # (Pace; "Stats" for qualifying: gap to pole, ideal lap, car
-    # characteristics), then the lap-level forensics (Head-to-head). Charts
+    # characteristics), then the lap-level forensics (Telemetry -- called
+    # Head-to-head until 2026-09-25, a name it shared with a Pace chart and
+    # the Teammates table). Charts
     # used to pile up in one "Race pace" tab whatever they were about.
     is_race_like = session_name in ("Race", "Sprint")
     if "Qualifying" in session_name:
-        tab_labels = ["Results", "Stats", "Head-to-head"]
+        tab_labels = ["Results", "Stats", "Telemetry"]
     elif is_race_like:
-        tab_labels = ["Results", "Strategy", "Pace", "Head-to-head"]
+        tab_labels = ["Results", "Strategy", "Pace", "Telemetry"]
     else:
-        tab_labels = ["Results", "Pace", "Head-to-head"]
+        tab_labels = ["Results", "Pace", "Telemetry"]
     weekend_tabs = url_tabs(tab_labels, "tabs_weekend")
     tab_classification, tab_pace, tab_telemetry = weekend_tabs[0], weekend_tabs[-2], weekend_tabs[-1]
     tab_strategy = weekend_tabs[1] if is_race_like else None
@@ -2935,7 +2939,7 @@ elif section == SECTION_SEASON:
         ],
     )
     tab_standings, tab_season_stats, tab_teammates, tab_pits = url_tabs(
-        ["Championship", "Race by race", "Teammates", "Pit stops"], "tabs_season"
+        ["Championship", "Stats", "Teammates", "Pit stops"], "tabs_season"
     )
 else:
     render_hero(
@@ -5725,6 +5729,10 @@ if section == SECTION_SEASON and showing(tab_season_stats):
             "(each race's full session is fetched once), instant after that.",
             accent=PALETTE["teal"],
         )
+        # Poles first: the tab used to be "Race by race" with the poles
+        # tacked on at the bottom, where the name said they didn't belong.
+        render_poles()
+        st.write("")
         stats_df, driver_overtakes = season_stats(year, tuple(schedule["EventName"].tolist()), OVERTAKE_RULES)
 
         if stats_df.empty:
@@ -5900,11 +5908,6 @@ if section == SECTION_SEASON and showing(tab_season_stats):
                     size_horizontal_bars(fig_driver_overtakes, [c for _, c in ranked_driver_overtakes])
                     style_bars(fig_driver_overtakes)
                     plotly_chart(fig_driver_overtakes, width="stretch", config=PLOTLY_CONFIG)
-
-if section == SECTION_SEASON and showing(tab_season_stats):
-    with tab_season_stats:
-        st.write("")
-        render_poles()
 
 # ------------------------------------------------------------- teammates --
 
