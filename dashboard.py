@@ -2020,7 +2020,11 @@ def render_hero(kicker_pill, kicker_text, title, subtitle, artwork="", chip_item
     chips for the facts that used to be crammed into that one line
     (circuit, date, session, race count) separated by middle dots."""
     chips_html = (
-        '<div class="hero-chips">' + "".join(f"<span>{c}</span>" for c in chip_items) + "</div>"
+        '<div class="hero-chips">'
+        # A chip that brings its own <span> (one with a tooltip) goes in as
+        # is; a None is a fact the session didn't have, and is skipped.
+        + "".join(c if c.startswith("<span") else f"<span>{c}</span>" for c in chip_items if c)
+        + "</div>"
         if chip_items else ""
     )
     st.markdown(
@@ -2032,6 +2036,28 @@ def render_hero(kicker_pill, kicker_text, title, subtitle, artwork="", chip_item
         f'</div><div class="hero-track">{artwork}</div></div>',
         unsafe_allow_html=True,
     )
+
+
+def track_temperature_chip(session):
+    """The header chip for the track temperature: the session average, from
+    the weather feed the timing service samples about once a minute. The
+    range and the air temperature ride in the tooltip -- one number fits a
+    chip, three don't. None when the session has no weather data, so the
+    header simply goes without the chip."""
+    try:
+        weather = session.weather_data
+        track = weather["TrackTemp"].dropna()
+    except Exception:
+        return None
+    if track.empty:
+        return None
+    tip = f"Track temperature over the session: {track.min():.0f}–{track.max():.0f} °C"
+    air = weather["AirTemp"].dropna() if "AirTemp" in weather else pd.Series(dtype=float)
+    if not air.empty:
+        tip += f". Air {air.mean():.0f} °C"
+    if "Rainfall" in weather and weather["Rainfall"].fillna(False).astype(bool).any():
+        tip += ". Rain at some point"
+    return f'<span title="{tip}.">\U0001F321️ Track {track.mean():.0f} °C</span>'
 
 
 def weekend_headline_cards(session, session_name):
@@ -2862,6 +2888,7 @@ if section == SECTION_WEEKEND:
             f"\U0001F4CD {event_row['Location']}",
             f"\U0001F4C5 {pd.to_datetime(event_row['EventDate']).strftime('%d %b %Y')}",
             f"\U0001F3AC {session_name}",
+            track_temperature_chip(session),
         ],
     )
     # The headline numbers sit above the tabs, not inside one of them: they
