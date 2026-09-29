@@ -4857,7 +4857,11 @@ def render_pace_tab():
                         ),
                         text=[f"{s:+.3f}" for _, s in ranked],
                         textposition="outside", cliponaxis=False,
-                        hovertemplate="%{y}: %{x:+.3f} s/lap<extra></extra>",
+                        # Formatted in Python, not with %{x:+.3f}: inside
+                        # st.plotly_chart that format was ignored on some bars
+                        # and the tooltip printed all 17 digits of the slope.
+                        customdata=[f"{s:+.3f}" for _, s in ranked],
+                        hovertemplate="%{y}: %{customdata} s/lap<extra></extra>",
                     )
                 )
                 fig_drivers.update_yaxes(autorange="reversed")
