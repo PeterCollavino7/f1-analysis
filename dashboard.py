@@ -4848,7 +4848,12 @@ def render_pace_tab():
                 # said nothing -- the panel header names it anyway.
                 fig_drivers.add_trace(
                     go.Bar(
-                        x=[s for _, s in ranked],
+                        # Rounded to the thousandth here, and the tooltip text
+                        # formatted in Python below: inside st.plotly_chart both
+                        # %{x:+.3f} and the axis hoverformat were ignored on some
+                        # bars, so the tooltip and the x-axis hover label printed
+                        # all 17 digits of the slope.
+                        x=[round(float(s), 3) for _, s in ranked],
                         y=[d for d, _ in ranked],
                         orientation="h",
                         marker=dict(
@@ -4857,9 +4862,6 @@ def render_pace_tab():
                         ),
                         text=[f"{s:+.3f}" for _, s in ranked],
                         textposition="outside", cliponaxis=False,
-                        # Formatted in Python, not with %{x:+.3f}: inside
-                        # st.plotly_chart that format was ignored on some bars
-                        # and the tooltip printed all 17 digits of the slope.
                         customdata=[f"{s:+.3f}" for _, s in ranked],
                         hovertemplate="%{y}: %{customdata} s/lap<extra></extra>",
                     )
