@@ -18,10 +18,15 @@ car and position data per race:
     <event>__<session>.base.zip        timing, laps, results, messages, weather
     <event>__<session>.telemetry.zip   car_data + position_data
 
-Idempotent: anything already uploaded is skipped, so it's safe to run daily
-(the scheduled task does) and to rerun after a failure. A session is only
-published 6 hours after it ended -- the feed fills in over the first hour or
-so, and an asset uploaded half-complete would never be replaced.
+Idempotent: anything already uploaded is skipped, so it's safe to run every
+15 minutes (the scheduled task does) and to rerun after a failure. A session
+is published as soon as it is complete, not on a fixed delay: the feed's
+SessionStatus stream ends with "Ends" a few minutes after the flag, and a
+race or sprint also waits for its official classification on Jolpica, which
+the hosted app reads itself and caches. Until then the session's local cache
+is thrown away and the next run tries again -- an asset uploaded
+half-complete would never be replaced. Six hours after the start a session
+is published with whatever there is, as it always used to be.
 
 Run with:  venv\\Scripts\\python publish_data.py [YEAR ...]   (default: this year)
 """
@@ -41,7 +46,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE_DIR = os.path.join(HERE, "cache")
 LOG_FILE = os.path.join(HERE, "publish_data.log")
 TELEMETRY_FILES = {"car_data.ff1pkl", "position_data.ff1pkl"}
+# No point loading a session before it can possibly be over: its scheduled
+# length from the start. Loading one still running is harmless (it fails the
+# readiness check and is retried), just wasted downloads.
+MIN_LENGTH = {
+    "Race": datetime.timedelta(minutes=100),
+    "Sprint": datetime.timedelta(minutes=35),
+    "Sprint Qualifying": datetime.timedelta(minutes=45),
+    "Sprint Shootout": datetime.timedelta(minutes=45),
+}
+DEFAULT_LENGTH = datetime.timedelta(minutes=60)
+# Past this, publish whatever the feed has -- a session that never sends
+# "Ends", or a classification Jolpica hasn't posted, must not hold it forever.
 SETTLE_TIME = datetime.timedelta(hours=6)
+RACE_LIKE = {"Race", "Sprint"}
 # gh isn't on PATH for the scheduled task (or Git Bash); this is where it lives.
 GH = os.environ.get("GH_EXE", r"C:\Users\peter\tools\bin\gh.exe")
 if not os.path.exists(GH):
@@ -98,21 +116,48 @@ def zip_files(folder, names, target):
 
 
 def finished_sessions(year):
-    """(round, session name) for every session that ended long enough ago."""
-    cutoff = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - SETTLE_TIME
+    """(round, session name, settled) for every session that can be over by
+    now; settled once SETTLE_TIME has passed since its start."""
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     schedule = fastf1.get_event_schedule(year, include_testing=False)
     for _, event in schedule.iterrows():
         for i in range(1, 6):
             name, start = event.get(f"Session{i}"), event.get(f"Session{i}DateUtc")
             if isinstance(name, str) and name and start is not None and not isinstance(start, float):
-                if start <= cutoff:
-                    yield int(event["RoundNumber"]), name
+                if start + MIN_LENGTH.get(name, DEFAULT_LENGTH) <= now:
+                    yield int(event["RoundNumber"]), name, start + SETTLE_TIME <= now
+
+
+def not_ready(session):
+    """Why the session isn't complete yet, or None when it is."""
+    status = session.session_status
+    if status is None or not status["Status"].isin(["Ends", "Finalised"]).any():
+        return "timing feed still open"
+    if session.name in RACE_LIKE:
+        classified = session.results["ClassifiedPosition"].fillna("").astype(str).str.strip()
+        if (classified == "").all():
+            return "no official classification on Jolpica yet"
+    return None
+
+
+def forget(session, round_number):
+    """Drop everything cached for a session that wasn't ready -- its pickles
+    and the HTTP responses behind them, timing feed and Jolpica alike --
+    so the next run downloads it afresh instead of reusing what was cached
+    half-way (FastF1 keeps HTTP responses for 12 hours)."""
+    shutil.rmtree(session_cache_folder(session), ignore_errors=True)
+    http = fastf1.req.Cache._requests_session_cached
+    if http is None:
+        return
+    jolpica = f"/{session.event.year}/{round_number}/"
+    stale = [u for u in http.cache.urls() if session.api_path in u or ("jolpi" in u and jolpica in u)]
+    http.cache.delete(urls=stale)
 
 
 def publish_year(year):
     existing = published_assets(year)
-    published = skipped = failed = 0
-    for round_number, session_name in finished_sessions(year):
+    published = skipped = failed = waiting = 0
+    for round_number, session_name, settled in finished_sessions(year):
         session = fastf1.get_session(year, round_number, session_name)
         key = session_key(session)
         if f"{key}.base.zip" in existing:
@@ -122,8 +167,18 @@ def publish_year(year):
             session.load()
             session.laps  # raises if the timing data didn't come through
         except Exception as exc:
-            log(f"  {key}: not loaded, will retry next run ({exc!r:.200})")
-            failed += 1
+            if settled:
+                log(f"  {key}: not loaded, will retry next run ({exc!r:.200})")
+                failed += 1
+            else:
+                waiting += 1  # most likely not on the feed yet; quiet retry
+            forget(session, round_number)
+            continue
+        reason = not_ready(session)
+        if reason and not settled:
+            log(f"  {key}: waiting ({reason})")
+            waiting += 1
+            forget(session, round_number)
             continue
         folder = session_cache_folder(session)
         files = os.listdir(folder)
@@ -145,7 +200,7 @@ def publish_year(year):
                 if result.returncode != 0:
                     raise RuntimeError(result.stderr.strip())
             size = sum(os.path.getsize(a) for a in assets) / 1e6
-            log(f"  {key}: published ({size:.1f} MB)")
+            log(f"  {key}: published ({size:.1f} MB){f', settled without: {reason}' if reason else ''}")
             published += 1
         except Exception as exc:
             log(f"  {key}: upload failed, will retry next run ({exc!r:.200})")
@@ -153,7 +208,10 @@ def publish_year(year):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         del session
-    log(f"{year}: {published} published, {skipped} already there, {failed} failed")
+    # Run every 15 minutes, a line per run would bury the log in "nothing to
+    # do"; only runs that did or tried something are written down.
+    if published or failed or waiting:
+        log(f"{year}: {published} published, {skipped} already there, {waiting} waiting, {failed} failed")
     return failed
 
 
@@ -162,7 +220,8 @@ def main():
     os.makedirs(CACHE_DIR, exist_ok=True)
     fastf1.Cache.enable_cache(CACHE_DIR)
     fastf1.set_log_level("WARNING")
-    log(f"publishing {', '.join(map(str, years))}")
+    if sys.stdout is not None:  # the log only records runs that did something
+        print(f"publishing {', '.join(map(str, years))}", flush=True)
     failed = 0
     for year in years:
         try:

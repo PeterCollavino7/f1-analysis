@@ -42,12 +42,14 @@ mkdir cache
 
 The official timing feed answers 403 to datacenter IPs — checked from Streamlit Community Cloud
 and from GitHub Actions runners — so the hosted app can't download sessions the way a local run
-does. Instead `publish_data.py` runs on a home PC (a daily Windows scheduled task): it loads every
-finished session through FastF1 and uploads that session's cache folder, zipped, to a private
+does. Instead `publish_data.py` runs on a home PC (a Windows scheduled task, every 15 minutes): it
+loads every finished session through FastF1 and uploads that session's cache folder, zipped, to a private
 data repo. The hosted app, given a read-only token for that repo in its Streamlit secrets
 (`F1_DATA_TOKEN`), downloads a session's files right before opening it, and FastF1 reads them
-from disk without calling the feed. Only published sessions are listed there; a new race shows
-up the day after it's run, as long as that PC is switched on at some point. Without the token —
+from disk without calling the feed. Only published sessions are listed there. A session goes up
+as soon as the feed marks it complete (a race or sprint also waits for its official classification
+on Jolpica), usually within the hour, and the hosted app notices within 15 minutes, as long as
+that PC is switched on. Without the token —
 any local run — none of this is used.
 
 ## Scripts

@@ -1556,9 +1556,10 @@ def freshness_line():
         f"<span>Data updated <b>{ago}</b></span></div>"
     )
 
-    # A session is late when it started more than 32 hours ago -- two hours
-    # to run, the six publish_data.py waits for the feed to settle, and a day
-    # for the daily task to come round -- and still isn't in the release.
+    # A session is late when it started more than 8 hours ago and still isn't
+    # in the release: publish_data.py runs every 15 minutes and publishes a
+    # session once it's complete, at the latest 6 hours after its start, so
+    # anything later means the home PC is off or the upload is failing.
     try:
         published = published_sessions(this_year)
         now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
@@ -1567,7 +1568,7 @@ def freshness_line():
             for i in range(1, 6):
                 name, start = event.get(f"Session{i}"), event.get(f"Session{i}DateUtc")
                 if (isinstance(name, str) and pd.notna(start)
-                        and now_utc - datetime.timedelta(days=10) < start < now_utc - datetime.timedelta(hours=32)
+                        and now_utc - datetime.timedelta(days=10) < start < now_utc - datetime.timedelta(hours=8)
                         and name not in published.get(event["EventName"], [])):
                     late.append(f"{event['EventName'].replace(' Grand Prix', ' GP')} {name}")
     except Exception:
